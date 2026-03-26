@@ -1,90 +1,116 @@
-# Obsidian Sample Plugin
+# Attachment Hub
 
-This is a sample plugin for Obsidian (https://obsidian.md).
+Obsidian 全能附件管理插件：自动重命名、格式转换、路径同步，一个插件搞定所有附件需求。
 
-This project uses TypeScript to provide type checking and documentation.
-The repo depends on the latest plugin API (obsidian.d.ts) in TypeScript Definition format, which contains TSDoc comments describing what it does.
+## 功能
 
-This sample plugin demonstrates some of the basic functionality the plugin API can do.
-- Adds a ribbon icon, which shows a Notice when clicked.
-- Adds a command "Open modal (simple)" which opens a Modal.
-- Adds a plugin setting tab to the settings page.
-- Registers a global click event and output 'click' to the console.
-- Registers a global interval which logs 'setInterval' to the console.
+### 附件管理
+- **粘贴/拖拽自动重命名**：支持自定义命名格式，变量包括 `${date}`、`${notename}`、`${originalname}`、`${md5}`
+- **自定义存储位置**：跟随 Obsidian 设置 / Vault 根目录子文件夹 / 笔记同级目录
+- **子路径模板**：支持 `${notename}`、`${notepath}`、`${parent}`、`${date}` 变量
+- **扩展名覆盖**：针对不同文件类型设置不同的命名规则
+- **单文件/文件夹覆盖**：为特定文件或文件夹自定义附件设置
 
-## First time developing plugins?
+### 图片处理
+- **格式转换**：粘贴/拖拽时自动转换为 WEBP、JPEG 或 PNG
+- **质量压缩**：可调节压缩质量（1-100）
+- **尺寸调整**：按最大宽度/高度/长边/短边自动缩放
+- **HEIC 支持**：自动解码 HEIC/HEIF 图片（静态图使用 heic2any，动态实况图走 FFmpeg）
+- **EXIF 保留**：可选保留相机参数，GPS 位置信息独立开关
 
-Quick starting guide for new plugin devs:
+### 视频处理
+- **FFmpeg 集成**：配置系统 FFmpeg 路径，支持 MP4、MOV、AVI、MKV、WEBM 转换
+- **视频转动图**：转换为 Animated WEBP 或 GIF
 
-- Check if [someone already developed a plugin for what you want](https://obsidian.md/plugins)! There might be an existing plugin similar enough that you can partner up with.
-- Make a copy of this repo as a template with the "Use this template" button (login to GitHub if you don't see it).
-- Clone your repo to a local development folder. For convenience, you can place this folder in your `.obsidian/plugins/your-plugin-name` folder.
-- Install NodeJS, then run `npm i` in the command line under your repo folder.
-- Run `npm run dev` to compile your plugin from `main.ts` to `main.js`.
-- Make changes to `main.ts` (or create new `.ts` files). Those changes should be automatically compiled into `main.js`.
-- Reload Obsidian to load the new version of your plugin.
-- Enable plugin in settings window.
-- For updates to the Obsidian API run `npm update` in the command line under your repo folder.
+### Frontmatter 路径同步
+- **自动追踪**：指定 frontmatter 字段（如 `ogImage`），自动记录附件相对路径
+- **路径格式**：支持纯路径、Markdown 链接 `![]()` 、Wikilink `![[]]` 三种格式
+- **移动同步**：移动笔记时自动更新 frontmatter 和正文中的相对路径（支持 `.md` 和 `.mdx`）
+- **附件重命名同步**：附件移动/重命名时同步更新所有引用
+- **删除清理**：附件删除时自动清空对应的 frontmatter 字段
+- **剪贴板粘贴**：通过命令将剪贴板图片直接粘贴到 frontmatter 字段
 
-## Releasing new releases
+### 排除规则
+- 按文件扩展名排除（正则匹配）
+- 按文件夹路径排除（支持子路径）
 
-- Update your `manifest.json` with your new version number, such as `1.0.1`, and the minimum Obsidian version required for your latest release.
-- Update your `versions.json` file with `"new-plugin-version": "minimum-obsidian-version"` so older versions of Obsidian can download an older version of your plugin that's compatible.
-- Create new GitHub release using your new version number as the "Tag version". Use the exact version number, don't include a prefix `v`. See here for an example: https://github.com/obsidianmd/obsidian-sample-plugin/releases
-- Upload the files `manifest.json`, `main.js`, `styles.css` as binary attachments. Note: The manifest.json file must be in two places, first the root path of your repository and also in the release.
-- Publish the release.
+## 安装
 
-> You can simplify the version bump process by running `npm version patch`, `npm version minor` or `npm version major` after updating `minAppVersion` manually in `manifest.json`.
-> The command will bump version in `manifest.json` and `package.json`, and add the entry for the new version to `versions.json`
+### 从源码构建
 
-## Adding your plugin to the community plugin list
+确保已安装 Node.js（>= v16）。
 
-- Check the [plugin guidelines](https://docs.obsidian.md/Plugins/Releasing/Plugin+guidelines).
-- Publish an initial version.
-- Make sure you have a `README.md` file in the root of your repo.
-- Make a pull request at https://github.com/obsidianmd/obsidian-releases to add your plugin.
+```bash
+# 克隆仓库
+git clone https://github.com/frevia/obsidian-attachment-hub.git
+cd obsidian-attachment-hub
 
-## How to use
+# 安装依赖
+npm install
 
-- Clone this repo.
-- Make sure your NodeJS is at least v16 (`node --version`).
-- `npm i` or `yarn` to install dependencies.
-- `npm run dev` to start compilation in watch mode.
+# 开发模式（监听文件变化，自动编译）
+npm run dev
 
-## Manually installing the plugin
-
-- Copy over `main.js`, `styles.css`, `manifest.json` to your vault `VaultFolder/.obsidian/plugins/your-plugin-id/`.
-
-## Improve code quality with eslint
-- [ESLint](https://eslint.org/) is a tool that analyzes your code to quickly find problems. You can run ESLint against your plugin to find common bugs and ways to improve your code. 
-- This project already has eslint preconfigured, you can invoke a check by running`npm run lint`
-- Together with a custom eslint [plugin](https://github.com/obsidianmd/eslint-plugin) for Obsidan specific code guidelines.
-- A GitHub action is preconfigured to automatically lint every commit on all branches.
-
-## Funding URL
-
-You can include funding URLs where people who use your plugin can financially support it.
-
-The simple way is to set the `fundingUrl` field to your link in your `manifest.json` file:
-
-```json
-{
-    "fundingUrl": "https://buymeacoffee.com"
-}
+# 生产构建
+npm run build
 ```
 
-If you have multiple URLs, you can also do:
+### 安装到 Obsidian
 
-```json
-{
-    "fundingUrl": {
-        "Buy Me a Coffee": "https://buymeacoffee.com",
-        "GitHub Sponsor": "https://github.com/sponsors",
-        "Patreon": "https://www.patreon.com/"
-    }
-}
+**方式一：符号链接（推荐开发时使用）**
+
+```bash
+ln -s /path/to/obsidian-attachment-hub /path/to/vault/.obsidian/plugins/attachment-hub
 ```
 
-## API Documentation
+**方式二：手动复制**
 
-See https://docs.obsidian.md
+将以下文件复制到 Vault 的 `.obsidian/plugins/attachment-hub/` 目录：
+
+- `main.js`
+- `manifest.json`
+- `styles.css`
+
+然后在 Obsidian 设置 → 第三方插件 中启用 **Attachment Hub**。
+
+## 命令面板
+
+| 命令 | 说明 |
+|------|------|
+| 扫描并修复所有 frontmatter 路径 | 全库扫描，修复 frontmatter 中的附件路径 |
+| 粘贴剪贴板图片到 frontmatter | 将剪贴板中的图片保存并写入指定 frontmatter 字段 |
+| 覆盖当前文件的附件设置 | 为当前文件设置独立的附件命名/存储规则 |
+| 重置附件设置覆盖 | 移除当前文件的独立设置，恢复全局规则 |
+
+## 项目结构
+
+```
+src/
+├── main.ts              # 插件主入口，事件处理和核心逻辑
+├── settings.ts          # 设置接口、默认值、类型工具
+├── settings-tab.ts      # 设置界面 UI
+├── modals.ts            # 弹窗（字段选择、确认、覆盖设置）
+├── utils.ts             # 工具函数（路径、MD5、变量替换、frontmatter 读写）
+├── image-processor.ts   # 图片格式检测与 Canvas API 转换
+├── heic-handler.ts      # HEIC/HEIF 静态图解码（heic2any）
+├── tiff-handler.ts      # TIFF 解码（utif2，待集成）
+├── ffmpeg-handler.ts    # FFmpeg 系统调用（视频/动态图转换）
+└── types.d.ts           # 第三方模块类型声明
+```
+
+## 开发
+
+```bash
+# 开发模式（自动编译 + sourcemap）
+npm run dev
+
+# 生产构建（类型检查 + 压缩）
+npm run build
+
+# 代码检查
+npm run lint
+```
+
+## 许可
+
+MIT
