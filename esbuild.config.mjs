@@ -1,6 +1,9 @@
 import esbuild from "esbuild";
 import process from "process";
 import { builtinModules } from 'node:module';
+import { createRequire } from "node:module";
+import { mkdir, copyFile, chmod } from "node:fs/promises";
+import path from "node:path";
 
 const banner =
 `/*
@@ -10,6 +13,21 @@ if you want to view the source, please visit the github repository of this plugi
 `;
 
 const prod = (process.argv[2] === "production");
+const require = createRequire(import.meta.url);
+
+async function copyVendoredExiftool() {
+	try {
+		const src = require.resolve("exiftool-vendored.pl/bin/exiftool");
+		const dstDir = path.join(process.cwd(), "vendor");
+		const dst = path.join(dstDir, "exiftool");
+		await mkdir(dstDir, { recursive: true });
+		await copyFile(src, dst);
+		await chmod(dst, 0o755);
+		console.log("[build] copied vendored exiftool -> vendor/exiftool");
+	} catch (e) {
+		console.warn("[build] failed to copy vendored exiftool:", e);
+	}
+}
 
 const context = await esbuild.context({
 	banner: {
@@ -43,7 +61,9 @@ const context = await esbuild.context({
 
 if (prod) {
 	await context.rebuild();
+	await copyVendoredExiftool();
 	process.exit(0);
 } else {
+	await copyVendoredExiftool();
 	await context.watch();
 }

@@ -201,6 +201,20 @@ export class AttachmentHubSettingTab extends PluginSettingTab {
 
     if (this.plugin.settings.convertTo !== "disabled") {
       new Setting(el)
+        .setName("可转换图片扩展名")
+        .setDesc("逗号分隔。留空使用内置默认：jpg,jpeg,png,gif,svg,bmp,eps,webp,avif,heic,heif")
+        .setClass("fps-sub-setting")
+        .addText(t =>
+          t
+            .setValue(this.plugin.settings.convertImageExtensions || "")
+            .setPlaceholder("例如 jpg,png,heic")
+            .onChange(async v => {
+              this.plugin.settings.convertImageExtensions = v;
+              await this.plugin.saveSettings();
+            }),
+        );
+
+      new Setting(el)
         .setName("压缩质量")
         .setDesc(`当前质量：${this.plugin.settings.quality}%`)
         .setClass("fps-sub-setting")

@@ -13,8 +13,9 @@ import {
   getOverride,
   saveOrigName,
   normalizePathFormat,
+  shouldConvertImageExt,
 } from "./settings";
-import { convertVideoFile, isAnimatedHeic, VideoTarget } from "./ffmpeg-handler";
+import { convertVideoFile, convertImageWithFFmpeg, copyMetadataToBuffer, isAnimatedHeic, VideoTarget } from "./ffmpeg-handler";
 import { convertImage, ImageFormat, ResizeOpts } from "./image-processor";
 import { decodeHeic } from "./heic-handler";
 import {
@@ -76,6 +77,7 @@ export class AttachmentProcessor {
     let convertedExt: string | null = null;
     const shouldTryFFmpeg = this.settings.ffmpegPath && this.settings.videoConvertTo !== "disabled";
     const shouldConvertImage = this.settings.convertTo !== "disabled";
+    const canConvertThisImage = shouldConvertImage && shouldConvertImageExt(this.settings, attach.extension);
 
     if (isVideo(attach.extension)) {
       if (shouldTryFFmpeg) {
@@ -85,7 +87,7 @@ export class AttachmentProcessor {
           convertedExt = result.ext;
         }
       }
-    } else if (isHeicExt(attach.extension)) {
+    } else if (isHeicExt(attach.extension) && canConvertThisImage) {
       const animated = shouldTryFFmpeg && (await this._isHeicAnimated(attach));
       if (animated) {
         const result = await this._convertVideoData(attach);
@@ -100,7 +102,7 @@ export class AttachmentProcessor {
           convertedExt = result.ext;
         }
       }
-    } else if (shouldConvertImage && isImage(attach.extension)) {
+    } else if (canConvertThisImage && isImage(attach.extension)) {
       const result = await this._convertImageData(attach);
       if (result) {
         await this.plugin.app.vault.modifyBinary(attach, result.data);
@@ -163,6 +165,8 @@ export class AttachmentProcessor {
         target: this.settings.videoConvertTo as VideoTarget,
         quality: this.settings.quality,
         resizeValue: this.settings.resizeMode !== "disabled" ? this.settings.resizeValue : 0,
+        preserveExif: this.settings.preserveExif,
+        preserveGps: this.settings.preserveGps,
       });
     } catch (e: unknown) {
       console.error("[AttachHub] Video conversion error:", e);
@@ -182,6 +186,18 @@ export class AttachmentProcessor {
     if (ext === target || (target === "jpg" && /^jpe?g$/.test(ext))) return null;
 
     try {
+      const basePath = (this.plugin.app.vault.adapter as AdapterWithBasePath).basePath;
+      const absPath = basePath ? join(basePath, attach.path) : "";
+      if (this.settings.preserveExif && this.settings.ffmpegPath && absPath && !isHeicExt(attach.extension)) {
+        return await convertImageWithFFmpeg(absPath, {
+          ffmpegPath: this.settings.ffmpegPath,
+          targetExt: target,
+          quality: this.settings.quality,
+          resizeValue: this.settings.resizeMode !== "disabled" ? this.settings.resizeValue : 0,
+          preserveExif: this.settings.preserveExif,
+          preserveGps: this.settings.preserveGps,
+        });
+      }
       if (isHeicExt(attach.extension)) {
         const imgData = await this.plugin.app.vault.readBinary(attach);
         const decoded = await decodeHeic(imgData);
@@ -193,7 +209,19 @@ export class AttachmentProcessor {
           mode: (this.settings.resizeMode || "disabled") as ResizeOpts["mode"],
           value: this.settings.resizeValue || 0,
         };
-        return await convertImage(decoded, target, this.settings.quality, resize);
+        const converted = await convertImage(decoded, target, this.settings.quality, resize);
+        if (!converted) return null;
+        if (this.settings.preserveExif) {
+          const withMeta = await copyMetadataToBuffer(
+            imgData,
+            attach.extension,
+            converted.data,
+            converted.ext,
+            this.settings.preserveGps,
+          );
+          return { data: withMeta, ext: converted.ext };
+        }
+        return converted;
       }
 
       // Regular image (JPG/PNG/BMP/GIF/etc.) — Canvas API
@@ -202,7 +230,19 @@ export class AttachmentProcessor {
         mode: (this.settings.resizeMode || "disabled") as ResizeOpts["mode"],
         value: this.settings.resizeValue || 0,
       };
-      return await convertImage(imgData, target, this.settings.quality, resize);
+      const converted = await convertImage(imgData, target, this.settings.quality, resize);
+      if (!converted) return null;
+      if (this.settings.preserveExif) {
+        const withMeta = await copyMetadataToBuffer(
+          imgData,
+          attach.extension,
+          converted.data,
+          converted.ext,
+          this.settings.preserveGps,
+        );
+        return { data: withMeta, ext: converted.ext };
+      }
+      return converted;
     } catch (e: unknown) {
       console.error("[AttachHub] Image conversion error:", e);
       return null;

@@ -52,6 +52,22 @@ export function isHeicExt(ext: string): boolean {
 export function isPasted(f: unknown): boolean {
   return f instanceof TFile && f.name.startsWith(PASTED_PREFIX);
 }
+
+export function shouldConvertImageExt(settings: AttachmentHubSettings, ext: string): boolean {
+  const raw = (settings.convertImageExtensions || "").trim();
+  const normalized = ext.toLowerCase();
+  if (!raw) {
+    return isImage(normalized) || isHeicExt(normalized);
+  }
+  const custom = raw
+    .split(",")
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (!custom.length) {
+    return isImage(normalized) || isHeicExt(normalized);
+  }
+  return custom.includes(normalized);
+}
 export function matchExt(ext: string, pat: string): boolean {
   return pat ? new RegExp(pat).test(ext) : false;
 }
@@ -113,6 +129,7 @@ export interface AttachmentHubSettings {
   quality: number;
   preserveExif: boolean;
   preserveGps: boolean;
+  convertImageExtensions: string;
   resizeMode: string;
   resizeValue: number;
   // FFmpeg / Video
@@ -147,6 +164,7 @@ export const DEFAULT_SETTINGS: AttachmentHubSettings = {
   quality: 85,
   preserveExif: false,
   preserveGps: false,
+  convertImageExtensions: "",
   resizeMode: "disabled",
   resizeValue: 1920,
   ffmpegPath: "",
