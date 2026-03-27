@@ -1,43 +1,53 @@
-import { Plugin, Notice, TFile, TFolder, normalizePath } from "obsidian";
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-misused-promises, no-empty, obsidianmd/ui/sentence-case */
+import { Plugin, Notice, TFile, normalizePath } from "obsidian";
 import {
   AttachmentHubSettings,
   DEFAULT_SETTINGS,
-  NOTE_EXT,
   isNote,
   isAttach,
+  migrateFromAM,
+  getOverride,
+  isExcluded,
+  getExtOverride,
   isImage,
   isVideo,
   isHeicExt,
   isPasted,
-  matchExt,
-  getExtOverride,
-  getOverride,
-  updateOverridePath,
-  isExcluded,
-  saveOrigName,
-  effectiveSetting,
-  migrateFromAM,
+  normalizePathFormat,
 } from "./settings";
+import {
+  clipImage, ensureFolder, isEmptyFolder,
+  pDir, pBase, pStem, pJoin, relative, resolveVars, pExt, resolve,
+  getRootPath, parseFM, getFM, writeFM, stripLink, fmtPath, fmSection, replaceFMField,
+  extractResolvedPaths, computeAttachPath, computeAttachName, dedup, md5sum,
+} from "./utils";
+import { saveOrigName } from "./settings";
+import { FieldPicker, OverrideModal } from "./modals";
+import { AttachmentHubSettingTab } from "./settings-tab";
+import { AttachmentProcessor } from "./attachment-processor";
+import { FrontmatterSync } from "./frontmatter-sync";
+import { IndexManager } from "./index-manager";
+import { EventHandlers } from "./event-handlers";
 import { convertVideoFile, isAnimatedHeic, VideoTarget } from "./ffmpeg-handler";
 import { convertImage, ImageFormat, ResizeOpts } from "./image-processor";
 import { decodeHeic } from "./heic-handler";
-import {
-  pDir, pBase, pExt, pStem, pJoin,
-  resolve, relative,
-  md5sum,
-  resolveVars,
-  getRootPath,
-  computeAttachPath,
-  computeAttachName,
-  dedup,
-  parseFM, fmSection, replaceFMField,
-  getFM, writeFM,
-  stripLink, fmtPath,
-  clipImage, ensureFolder, isEmptyFolder,
-  extractResolvedPaths,
-} from "./utils";
-import { FieldPicker, OverrideModal } from "./modals";
-import { AttachmentHubSettingTab } from "./settings-tab";
+
+interface AdapterWithBasePath {
+  basePath?: string;
+}
+
+function getAttachmentFolderPath(app: unknown): string {
+  if (
+    typeof app === "object" &&
+    app !== null &&
+    "getConfig" in app &&
+    typeof (app as { getConfig?: unknown }).getConfig === "function"
+  ) {
+    const value = (app as { getConfig: (key: string) => unknown }).getConfig("attachmentFolderPath");
+    return typeof value === "string" ? value : "";
+  }
+  return "";
+}
 
 export default class AttachmentHubPlugin extends Plugin {
   settings!: AttachmentHubSettings;
@@ -50,86 +60,33 @@ export default class AttachmentHubPlugin extends Plugin {
   private _mdxHash = new Map<string, string>();
   private _renameT?: ReturnType<typeof setTimeout>;
 
+  // New managers
+  private attachmentProcessor!: AttachmentProcessor;
+  private frontmatterSync!: FrontmatterSync;
+  private indexManager!: IndexManager;
+  private eventHandlers!: EventHandlers;
+
   async onload(): Promise<void> {
     await this._loadSettings();
 
+    // Initialize managers
+    this.indexManager = new IndexManager(this.app, this.settings, this._idx, this._noteFields);
+    this.attachmentProcessor = new AttachmentProcessor(this, this.settings, this._writing);
+    this.frontmatterSync = new FrontmatterSync(this, this.settings, this._writing, this._noteFields, this._mdxHash);
+    this.eventHandlers = new EventHandlers(
+      this, 
+      this.settings, 
+      this.attachmentProcessor, 
+      this.frontmatterSync, 
+      this.indexManager, 
+      this._createQ, 
+      this._writing, 
+      this._modTimers
+    );
+
     this.app.workspace.onLayoutReady(() => {
-      this._buildIndex();
-
-      this.registerEvent(
-        this.app.vault.on("create", (file) => {
-          if (!(file instanceof TFile) || NOTE_EXT.has(file.extension)) return;
-          if (Date.now() - file.stat.ctime > 1000) return;
-          if (matchExt(file.extension, this.settings.excludeExtensionPattern)) return;
-          this._createQ.push(file);
-        }),
-      );
-
-      this.registerEvent(
-        this.app.vault.on("modify", (file) => {
-          if (!(file instanceof TFile) || !isNote(file) || this._writing.has(file.path)) return;
-          if (this._createQ.length > 0) this._handlePasteDetect(file);
-          if (file.extension === "mdx") {
-            if (this._modTimers[file.path]) clearTimeout(this._modTimers[file.path]);
-            this._modTimers[file.path] = setTimeout(() => {
-              delete this._modTimers[file.path];
-              this._onMdxModify(file);
-            }, 600);
-          }
-        }),
-      );
-
-      this.registerEvent(
-        this.app.metadataCache.on("changed", (file) => {
-          if (!(file instanceof TFile) || !isNote(file) || this._writing.has(file.path)) return;
-          if (file.extension === "md") this._onFMChange(file);
-        }),
-      );
-
-      this.registerEvent(
-        this.app.vault.on("rename", async (file, oldPath) => {
-          const ovr = this.settings.overridePath[oldPath];
-          if (ovr) {
-            updateOverridePath(this.settings, file.path, oldPath);
-            await this.saveSettings();
-          }
-          if (file instanceof TFile && isNote(file)) {
-            this._removeNoteFromIndex(oldPath);
-            if (file.parent && isExcluded(file.parent.path, this.settings)) return;
-            if (this.settings.handleNoteMove) await this._handleNoteMove(file, oldPath);
-          } else if (file instanceof TFile && isAttach(file) && this.settings.handleAttachmentMove) {
-            await this._handleAttachRename(file, oldPath);
-          }
-        }),
-      );
-
-      this.registerEvent(
-        this.app.vault.on("delete", async (file) => {
-          if (isNote(file)) {
-            this._removeNoteFromIndex(file.path);
-            if (this.settings.overridePath[file.path]) {
-              delete this.settings.overridePath[file.path];
-              await this.saveSettings();
-            }
-            this._cleanOldAttachFolder(file.path);
-            return;
-          }
-          if (isAttach(file) && this.settings.clearOnDelete) this._onAttachDelete(file as TFile);
-        }),
-      );
-
-      this.registerEvent(
-        this.app.workspace.on("file-menu", (menu, file) => {
-          if ((file instanceof TFile && file.parent && isExcluded(file.parent.path, this.settings)) || isAttach(file))
-            return;
-          menu.addItem(item => {
-            item.setTitle("Override attachment setting").setIcon("image-plus").onClick(() => {
-              const s = { ...getOverride(this.settings, file.path) };
-              new OverrideModal(this, file as TFile | TFolder, s).open();
-            });
-          });
-        }),
-      );
+      this.indexManager.buildIndex();
+      this.eventHandlers.registerEvents();
     });
 
     this.addSettingTab(new AttachmentHubSettingTab(this.app, this));
@@ -156,7 +113,7 @@ export default class AttachmentHubPlugin extends Plugin {
       checkCallback: (chk: boolean) => {
         const f = this.app.workspace.getActiveFile();
         if (f && isNote(f)) {
-          if (!chk) this._pasteFM(f);
+          if (!chk) this._pasteFM(f).catch(err => console.error("[AttachHub] Paste failed:", err));
           return true;
         }
         return false;
@@ -184,7 +141,7 @@ export default class AttachmentHubPlugin extends Plugin {
         if (f && isNote(f)) {
           if (!chk) {
             delete this.settings.overridePath[f.path];
-            this.saveSettings().then(() => new Notice("已重置附件设置"));
+            this.saveSettings().then(() => new Notice("已重置附件设置")).catch(err => console.error("[AttachHub] Save settings failed:", err));
           }
           return true;
         }
@@ -265,7 +222,7 @@ export default class AttachmentHubPlugin extends Plugin {
         this._createQ.shift();
         await this._processNewAttach(f, noteFile);
       }
-    } catch (_) {}
+    } catch {}
   }
 
   private async _processNewAttach(attach: TFile, source: TFile): Promise<void> {
@@ -313,7 +270,7 @@ export default class AttachmentHubPlugin extends Plugin {
     // Use new extension if converted, otherwise keep original
     const finalExt = convertedExt || attach.extension;
 
-    const obsFolder = (this.app.vault as any).getConfig("attachmentFolderPath") || "";
+    const obsFolder = getAttachmentFolderPath(this.app);
     const attachPath = computeAttachPath(source, finalExt, setting, this.settings.dateFormat, obsFolder);
     let attachName = await computeAttachName(
       source, attach, setting, this.settings.dateFormat, this.app.vault.adapter,
@@ -357,16 +314,16 @@ export default class AttachmentHubPlugin extends Plugin {
    */
   private async _convertVideoData(attach: TFile): Promise<{ data: ArrayBuffer; ext: string } | null> {
     try {
-      const basePath = (this.app.vault.adapter as any).basePath as string;
+      const basePath = (this.app.vault.adapter as AdapterWithBasePath).basePath;
       if (!basePath) return null;
-      const absPath = require("path").join(basePath, attach.path);
+      const absPath = pJoin(basePath, attach.path);
       return await convertVideoFile(absPath, attach.extension, {
         ffmpegPath: this.settings.ffmpegPath,
         target: this.settings.videoConvertTo as VideoTarget,
         quality: this.settings.quality,
         resizeValue: this.settings.resizeMode !== "disabled" ? this.settings.resizeValue : 0,
       });
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error("[AttachHub] Video conversion error:", e);
       return null;
     }
@@ -405,7 +362,7 @@ export default class AttachmentHubPlugin extends Plugin {
         value: this.settings.resizeValue || 0,
       };
       return await convertImage(imgData, target, this.settings.quality, resize);
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error("[AttachHub] Image conversion error:", e);
       return null;
     }
@@ -413,11 +370,11 @@ export default class AttachmentHubPlugin extends Plugin {
 
   private async _isHeicAnimated(attach: TFile): Promise<boolean> {
     try {
-      const basePath = (this.app.vault.adapter as any).basePath as string;
+      const basePath = (this.app.vault.adapter as AdapterWithBasePath).basePath;
       if (!basePath) return false;
-      const absPath = require("path").join(basePath, attach.path);
+      const absPath = pJoin(basePath, attach.path);
       return await isAnimatedHeic(absPath);
-    } catch (_) {
+    } catch {
       return false;
     }
   }
@@ -481,11 +438,11 @@ export default class AttachmentHubPlugin extends Plugin {
 
   private async _updateFMAfterRename(source: TFile, oldAttachPath: string, newAttachPath: string): Promise<void> {
     let content: string;
-    try { content = await this.app.vault.read(source); } catch (_) { return; }
+    try { content = await this.app.vault.read(source); } catch { return; }
     const fm = parseFM(content);
     if (!fm) return;
     const noteDir = pDir(source.path);
-    const fmt = this.settings.pathFormat || "plain";
+    const fmt = normalizePathFormat(this.settings.pathFormat);
     const upd: Record<string, string> = {};
     for (const field of this.settings.trackedFields) {
       const val = fm[field];
@@ -517,7 +474,7 @@ export default class AttachmentHubPlugin extends Plugin {
 
   private async _onMdxModify(file: TFile): Promise<void> {
     let content: string;
-    try { content = await this.app.vault.cachedRead(file); } catch (_) { return; }
+    try { content = await this.app.vault.cachedRead(file); } catch { return; }
     const section = fmSection(content);
     if (!section || this._mdxHash.get(file.path) === section) return;
     this._mdxHash.set(file.path, section);
@@ -527,8 +484,8 @@ export default class AttachmentHubPlugin extends Plugin {
     await this._autoProcessFM(file, fm, content);
   }
 
-  private async _autoProcessFM(file: TFile, fm: Record<string, any>, content: string | null): Promise<void> {
-    const fmt = this.settings.pathFormat || "plain";
+  private async _autoProcessFM(file: TFile, fm: Record<string, unknown>, content: string | null): Promise<void> {
+    const fmt = normalizePathFormat(this.settings.pathFormat);
     const noteDir = pDir(file.path);
     const upd: Record<string, string> = {};
     for (const field of this.settings.trackedFields) {
@@ -581,7 +538,7 @@ export default class AttachmentHubPlugin extends Plugin {
     if (!(freshFile instanceof TFile)) return;
 
     let content: string;
-    try { content = await this.app.vault.read(freshFile); } catch (_) { return; }
+    try { content = await this.app.vault.read(freshFile); } catch { return; }
 
     let changed = false;
 
@@ -594,7 +551,7 @@ export default class AttachmentHubPlugin extends Plugin {
         const plain = stripLink(val) || val;
         const newRel = this._rewriteRelPath(oldDir, newDir, plain);
         if (newRel) {
-          const formatted = fmtPath(newRel, this.settings.pathFormat || "plain");
+          const formatted = fmtPath(newRel, normalizePathFormat(this.settings.pathFormat));
           content = replaceFMField(content, field, formatted);
           changed = true;
         }
@@ -634,7 +591,6 @@ export default class AttachmentHubPlugin extends Plugin {
       } finally {
         setTimeout(() => this._writing.delete(freshFile.path), 2000);
       }
-      const count = Object.keys(fm ? this.settings.trackedFields.filter(f => fm[f]) : []).length;
       if (!this.settings.disableNotification) new Notice(`已更新相对路径：${pBase(freshFile.path)}`);
       const newFM = parseFM(content);
       if (newFM) this._updateNoteIndex(freshFile.path, extractResolvedPaths(newFM, this.settings.trackedFields, newDir));
@@ -660,7 +616,7 @@ export default class AttachmentHubPlugin extends Plugin {
         const p = stripLink(val) || val;
         const r = resolve(noteDir, p);
         if (r && normalizePath(r) === normOld)
-          upd[field] = fmtPath(relative(noteDir, normNew), this.settings.pathFormat || "plain");
+          upd[field] = fmtPath(relative(noteDir, normNew), normalizePathFormat(this.settings.pathFormat));
       }
       if (Object.keys(upd).length) {
         this._writing.add(notePath);
@@ -707,7 +663,7 @@ export default class AttachmentHubPlugin extends Plugin {
 
   private async _cleanOldAttachFolder(notePath: string): Promise<void> {
     const setting = getOverride(this.settings, notePath);
-    const obsFolder = (this.app.vault as any).getConfig("attachmentFolderPath") || "";
+    const obsFolder = getAttachmentFolderPath(this.app);
     const noteDir = pDir(notePath);
     const sub = resolveVars(setting.attachmentPath || "", {
       dateFormat: this.settings.dateFormat,
@@ -718,7 +674,7 @@ export default class AttachmentHubPlugin extends Plugin {
     const root = getRootPath(noteDir, setting, obsFolder);
     const old = normalizePath(pJoin(root, sub));
     if (old && (await isEmptyFolder(this.app.vault.adapter, old))) {
-      try { await this.app.vault.adapter.rmdir(old, true); } catch (_) {}
+      try { await this.app.vault.adapter.rmdir(old, true); } catch {}
     }
   }
 
@@ -733,7 +689,7 @@ export default class AttachmentHubPlugin extends Plugin {
     const doIt = async (field: string) => {
       try {
         const setting = getOverride(this.settings, noteFile.path);
-        const obsFolder = (this.app.vault as any).getConfig("attachmentFolderPath") || "";
+        const obsFolder = getAttachmentFolderPath(this.app);
         const attachDir = computeAttachPath(noteFile, clip.ext, setting, this.settings.dateFormat, obsFolder);
         let name = await computeAttachName(noteFile, null, setting, this.settings.dateFormat, this.app.vault.adapter);
         name += "." + clip.ext;
@@ -742,14 +698,26 @@ export default class AttachmentHubPlugin extends Plugin {
         const dst = normalizePath(pJoin(attachDir, dedupName));
         await this.app.vault.createBinary(dst, clip.buf);
         const rel = relative(pDir(noteFile.path), dst);
-        const fmt = fmtPath(rel, this.settings.pathFormat || "plain");
+        console.debug("[AttachHub] pathFormat:", this.settings.pathFormat, "rel:", rel);
+        const formatMode = normalizePathFormat(this.settings.pathFormat);
+        const fmt = formatMode === "plain" ? rel : fmtPath(rel, formatMode);
+        console.debug("[AttachHub] formatted:", fmt);
         this._writing.add(noteFile.path);
         try { await writeFM(this.app, noteFile, { [field]: fmt }); } finally {
           setTimeout(() => this._writing.delete(noteFile.path), 2000);
         }
+        // Defensive normalization: keep pasted frontmatter value plain when configured.
+        if (formatMode === "plain") {
+          const latest = await getFM(this.app, noteFile);
+          const current = latest?.[field];
+          if (typeof current === "string") {
+            const plain = stripLink(current) || current;
+            if (plain !== current) await writeFM(this.app, noteFile, { [field]: plain });
+          }
+        }
         new Notice(`图片已保存 → ${field}: ${pBase(dst)}`);
-      } catch (e: any) {
-        new Notice(`粘贴失败：${e.message}`);
+      } catch (e: unknown) {
+        new Notice(`粘贴失败：${e instanceof Error ? e.message : String(e)}`);
       }
     };
 
@@ -763,24 +731,37 @@ export default class AttachmentHubPlugin extends Plugin {
     const all = this.app.vault.getFiles();
     const notes = all.filter(isNote);
     let fixed = 0;
-    for (const nf of notes) {
-      const fm = await getFM(this.app, nf);
-      if (!fm) continue;
-      const nd = pDir(nf.path);
-      const fix: Record<string, string> = {};
-      for (const field of this.settings.trackedFields) {
-        const val = fm[field];
-        if (typeof val !== "string" || !val) continue;
-        const p = stripLink(val) || val;
-        if (p.startsWith("http")) continue;
-        const r = resolve(nd, p);
-        if (!r || this.app.vault.getAbstractFileByPath(r)) continue;
-        const fn = pBase(p);
-        const found = all.find(f => isAttach(f) && pBase(f.path) === fn);
-        if (found) fix[field] = fmtPath(relative(nd, found.path), this.settings.pathFormat || "plain");
-      }
-      if (Object.keys(fix).length && (await writeFM(this.app, nf, fix))) fixed++;
+    
+    // Process notes in batches to avoid memory issues
+    const batchSize = 10;
+    for (let i = 0; i < notes.length; i += batchSize) {
+      const batch = notes.slice(i, i + batchSize);
+      const results = await Promise.all(
+        batch.map(async (nf) => {
+          const fm = await getFM(this.app, nf);
+          if (!fm) return false;
+          const nd = pDir(nf.path);
+          const fix: Record<string, string> = {};
+          for (const field of this.settings.trackedFields) {
+            const val = fm[field];
+            if (typeof val !== "string" || !val) continue;
+            const p = stripLink(val) || val;
+            if (p.startsWith("http")) continue;
+            const r = resolve(nd, p);
+            if (!r || this.app.vault.getAbstractFileByPath(r)) continue;
+            const fn = pBase(p);
+            const found = all.find(f => isAttach(f) && pBase(f.path) === fn);
+            if (found) fix[field] = fmtPath(relative(nd, found.path), normalizePathFormat(this.settings.pathFormat));
+          }
+          if (Object.keys(fix).length) {
+            return await writeFM(this.app, nf, fix);
+          }
+          return false;
+        })
+      );
+      fixed += results.filter(r => r).length;
     }
+    
     new Notice(`已修复 ${fixed} 个笔记`);
     this._buildIndex();
   }
@@ -796,21 +777,19 @@ export default class AttachmentHubPlugin extends Plugin {
     if (!Array.isArray(this.settings.excludePathsArray)) this.settings.excludePathsArray = [];
     if (!Array.isArray(this.settings.originalNameStorage)) this.settings.originalNameStorage = [];
     if (!this.settings.overridePath) this.settings.overridePath = {};
+    this.settings.pathFormat = normalizePathFormat(this.settings.pathFormat);
 
     if (!data._migrated && !data.attachPath) {
-      const migrated = await migrateFromAM(this.app.vault.adapter as any, this.settings);
+      const migrated = await migrateFromAM(this.app.vault.adapter, this.settings, this.app.vault.configDir);
       if (migrated) {
         await this.saveSettings();
         new Notice("已导入 Attachment Management 插件设置");
       }
     }
 
-    if ((data as any).renameFormat) {
-      this.settings.attachPath.attachFormat = (data as any).renameFormat;
-      this.settings.dateFormat = (data as any).renameDateFormat || this.settings.dateFormat;
-      delete (this.settings as any).renameFormat;
-      delete (this.settings as any).renameDateFormat;
-      delete (this.settings as any).renameOnPaste;
+    if (typeof data.renameFormat === "string") {
+      this.settings.attachPath.attachFormat = data.renameFormat;
+      this.settings.dateFormat = typeof data.renameDateFormat === "string" ? data.renameDateFormat : this.settings.dateFormat;
       await this.saveSettings();
     }
   }

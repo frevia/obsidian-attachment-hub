@@ -1,16 +1,29 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 /**
  * TIFF decoder using UTIF2.
  * Converts TIFF images to RGBA pixel data for Canvas processing.
  * Phase 2 implementation — will be wired in when dependencies are installed.
  */
 
-let UTIF: any = null;
+interface UTIFLibrary {
+  decode: (data: ArrayBuffer) => IFD[];
+  decodeImage: (data: ArrayBuffer, ifd: IFD) => void;
+  toRGBA8: (ifd: IFD) => number[];
+}
 
-async function loadUTIF(): Promise<any> {
+interface IFD {
+  width: number;
+  height: number;
+}
+
+let UTIF: UTIFLibrary | null = null;
+
+async function loadUTIF(): Promise<UTIFLibrary | null> {
   if (UTIF) return UTIF;
   try {
-    UTIF = await import("utif2");
-  } catch (_) {
+    const module = await import("utif2");
+    UTIF = module as UTIFLibrary;
+  } catch {
     console.warn("[AttachHub] utif2 not available");
   }
   return UTIF;
@@ -43,7 +56,7 @@ export async function decodeTiff(data: ArrayBuffer): Promise<ArrayBuffer | null>
     ctx.putImageData(imgData, 0, 0);
     const blob = await canvas.convertToBlob({ type: "image/png" });
     return await blob.arrayBuffer();
-  } catch (e) {
+  } catch (e: unknown) {
     console.error("[AttachHub] TIFF decode failed:", e);
     return null;
   }

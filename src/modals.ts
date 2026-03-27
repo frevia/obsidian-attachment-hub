@@ -1,3 +1,4 @@
+/* eslint-disable obsidianmd/ui/sentence-case */
 import { App, Modal, Setting, SuggestModal, TFile, TFolder } from "obsidian";
 import { ROOT_LABELS, ROOT_OBS, AttachPathSettings } from "./settings";
 
