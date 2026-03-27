@@ -37,14 +37,22 @@ interface AdapterWithBasePath {
 }
 
 function getAttachmentFolderPath(app: unknown): string {
-  if (
-    typeof app === "object" &&
-    app !== null &&
-    "getConfig" in app &&
-    typeof (app as { getConfig?: unknown }).getConfig === "function"
-  ) {
+  if (typeof app !== "object" || app === null) return "";
+  if ("getConfig" in app && typeof (app as { getConfig?: unknown }).getConfig === "function") {
     const value = (app as { getConfig: (key: string) => unknown }).getConfig("attachmentFolderPath");
-    return typeof value === "string" ? value : "";
+    if (typeof value === "string") return value;
+  }
+  if ("vault" in app) {
+    const vault = (app as { vault?: unknown }).vault;
+    if (
+      typeof vault === "object" &&
+      vault !== null &&
+      "getConfig" in vault &&
+      typeof (vault as { getConfig?: unknown }).getConfig === "function"
+    ) {
+      const value = (vault as { getConfig: (key: string) => unknown }).getConfig("attachmentFolderPath");
+      if (typeof value === "string") return value;
+    }
   }
   return "";
 }
