@@ -30,6 +30,56 @@ function errorMessage(err: unknown): string {
   return String(err);
 }
 
+let exiftoolAvailable: boolean | null = null;
+let exiftoolPath: string | null = null;
+
+async function hasExiftool(): Promise<boolean> {
+  if (exiftoolAvailable !== null) return exiftoolAvailable;
+  // Preferred: use bundled executable copied to plugin directory.
+  try {
+    const bundled = path.join(__dirname, "vendor", "exiftool");
+    await execFileAsync(bundled, ["-ver"], { timeout: 5000 });
+    exiftoolPath = bundled;
+    exiftoolAvailable = true;
+    return true;
+  } catch {
+    // continue
+  }
+  try {
+    exiftoolPath = require.resolve("exiftool-vendored.pl/bin/exiftool");
+    await execFileAsync(exiftoolPath, ["-ver"], { timeout: 5000 });
+    exiftoolAvailable = true;
+    return true;
+  } catch {
+    // Fallback to system exiftool (PATH/common locations).
+    for (const candidate of ["exiftool", "/opt/homebrew/bin/exiftool", "/usr/local/bin/exiftool", "/usr/bin/exiftool"]) {
+      try {
+        await execFileAsync(candidate, ["-ver"], { timeout: 5000 });
+        exiftoolPath = candidate;
+        exiftoolAvailable = true;
+        return true;
+      } catch {
+        // try next
+      }
+    }
+    exiftoolAvailable = false;
+    return false;
+  }
+}
+
+async function copyMetadataWithExiftool(inputFile: string, outputFile: string, keepGps: boolean): Promise<void> {
+  if (!(await hasExiftool())) return;
+  const args = ["-overwrite_original", "-TagsFromFile", inputFile, "-all:all"];
+  if (!keepGps) args.push("-gps:all=", "-xmp:geotag=");
+  args.push("-P");
+  try {
+    if (!exiftoolPath) return;
+    await execFileAsync(exiftoolPath, [...args, outputFile], { timeout: 20_000 });
+  } catch (e: unknown) {
+    console.warn("[AttachHub] exiftool metadata copy failed:", errorMessage(e));
+  }
+}
+
 export type VideoTarget = "webp" | "gif" | "disabled";
 
 export const VIDEO_EXT = new Set(["mp4", "mov", "avi", "mkv", "webm"]);
@@ -113,6 +163,8 @@ interface ConvertOpts {
   target: VideoTarget;
   quality: number;       // 1-100
   resizeValue?: number;  // max dimension (0 = no resize)
+  preserveExif?: boolean;
+  preserveGps?: boolean;
 }
 
 export async function convertVideo(
@@ -132,6 +184,7 @@ export async function convertVideo(
 
     const args = buildFFmpegArgs(inFile, outFile, inputExt, opts);
     await execFileAsync(opts.ffmpegPath, args, { timeout: 120_000 });
+    if (opts.preserveExif) await copyMetadataWithExiftool(inFile, outFile, Boolean(opts.preserveGps));
 
     const result = await readFileAsync(outFile);
     return { data: result.buffer.slice(result.byteOffset, result.byteOffset + result.byteLength), ext: outExt };
@@ -153,6 +206,15 @@ function buildFFmpegArgs(
 ): string[] {
   const args = ["-y", "-i", inFile];
   const q = Math.max(1, Math.min(100, opts.quality));
+  if (opts.preserveExif) {
+    args.push("-map_metadata", "0");
+    if (!opts.preserveGps) {
+      // Best effort: strip common location metadata tags while keeping other EXIF fields.
+      args.push("-metadata", "location=");
+      args.push("-metadata", "location-eng=");
+      args.push("-metadata", "com.apple.quicktime.location.ISO6709=");
+    }
+  }
 
   if (opts.target === "webp") {
     args.push("-vcodec", "libwebp");
@@ -185,6 +247,8 @@ export interface StillConvertOpts {
   targetExt: string;   // "webp" | "jpg" | "png"
   quality: number;
   resizeValue?: number;
+  preserveExif?: boolean;
+  preserveGps?: boolean;
 }
 
 /**
@@ -204,6 +268,14 @@ export async function convertImageWithFFmpeg(
   try {
     const args = ["-y", "-i", absPath, "-frames:v", "1"];
     const q = Math.max(1, Math.min(100, opts.quality));
+    if (opts.preserveExif) {
+      args.push("-map_metadata", "0");
+      if (!opts.preserveGps) {
+        args.push("-metadata", "location=");
+        args.push("-metadata", "location-eng=");
+        args.push("-metadata", "com.apple.quicktime.location.ISO6709=");
+      }
+    }
 
     if (outExt === "webp") {
       args.push("-vcodec", "libwebp", "-lossless", "0", "-q:v", String(q));
@@ -218,6 +290,7 @@ export async function convertImageWithFFmpeg(
 
     args.push(outFile);
     await execFileAsync(opts.ffmpegPath, args, { timeout: 30_000 });
+    if (opts.preserveExif) await copyMetadataWithExiftool(absPath, outFile, Boolean(opts.preserveGps));
     const result = await readFileAsync(outFile);
     return { data: result.buffer.slice(result.byteOffset, result.byteOffset + result.byteLength), ext: outExt };
   } catch (e: unknown) {
@@ -247,12 +320,45 @@ export async function convertVideoFile(
   try {
     const args = buildFFmpegArgs(absPath, outFile, inputExt, opts);
     await execFileAsync(opts.ffmpegPath, args, { timeout: 120_000 });
+    if (opts.preserveExif) await copyMetadataWithExiftool(absPath, outFile, Boolean(opts.preserveGps));
     const result = await readFileAsync(outFile);
     return { data: result.buffer.slice(result.byteOffset, result.byteOffset + result.byteLength), ext: outExt };
   } catch (e: unknown) {
     console.error("[AttachHub] FFmpeg file conversion failed:", errorMessage(e));
     return null;
   } finally {
+    try { await unlinkAsync(outFile); } catch {}
+    try { fs.rmdirSync(tmpDir); } catch {}
+  }
+}
+
+/**
+ * Preserve metadata for conversions performed outside FFmpeg (e.g. Canvas).
+ * Uses exiftool as a post-process metadata copier from source -> output bytes.
+ */
+export async function copyMetadataToBuffer(
+  sourceData: ArrayBuffer,
+  sourceExt: string,
+  outputData: ArrayBuffer,
+  outputExt: string,
+  keepGps: boolean,
+): Promise<ArrayBuffer> {
+  if (!(await hasExiftool())) return outputData;
+  const tmpDir = await mkdtempAsync(path.join(os.tmpdir(), "attachhub-meta-"));
+  const safeSourceExt = (sourceExt || "bin").replace(/[^a-z0-9]/gi, "").toLowerCase() || "bin";
+  const srcFile = path.join(tmpDir, `source.${safeSourceExt}`);
+  const outFile = path.join(tmpDir, `output.${outputExt}`);
+  try {
+    await writeFileAsync(srcFile, Buffer.from(sourceData));
+    await writeFileAsync(outFile, Buffer.from(outputData));
+    await copyMetadataWithExiftool(srcFile, outFile, keepGps);
+    const result = await readFileAsync(outFile);
+    return result.buffer.slice(result.byteOffset, result.byteOffset + result.byteLength);
+  } catch (e: unknown) {
+    console.warn("[AttachHub] metadata buffer copy failed:", errorMessage(e));
+    return outputData;
+  } finally {
+    try { await unlinkAsync(srcFile); } catch {}
     try { await unlinkAsync(outFile); } catch {}
     try { fs.rmdirSync(tmpDir); } catch {}
   }
