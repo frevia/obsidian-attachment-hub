@@ -1,3 +1,4 @@
+/* eslint-disable import/no-nodejs-modules, no-undef, no-empty */
 /**
  * FFmpeg handler using system-installed FFmpeg binary.
  * Supports: animated HEIF → WEBP, MP4/MOV → WEBP/GIF, and general video conversion.
@@ -14,6 +15,20 @@ const readFileAsync = promisify(fs.readFile);
 const writeFileAsync = promisify(fs.writeFile);
 const unlinkAsync = promisify(fs.unlink);
 const mkdtempAsync = promisify(fs.mkdtemp);
+
+interface MaybeErrno {
+  code?: string;
+  message?: string;
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "object" && err !== null && "message" in err) {
+    const msg = (err as MaybeErrno).message;
+    if (typeof msg === "string") return msg;
+  }
+  return String(err);
+}
 
 export type VideoTarget = "webp" | "gif" | "disabled";
 
@@ -85,10 +100,11 @@ export async function testFFmpeg(ffmpegPath: string): Promise<string> {
     const firstLine = output.split("\n")[0]?.trim();
     if (!firstLine) throw new Error("No output from ffmpeg");
     return firstLine;
-  } catch (e: any) {
-    if (e.code === "ENOENT") throw new Error(`File not found: ${ffmpegPath}`);
-    if (e.code === "EACCES") throw new Error(`Permission denied: ${ffmpegPath}`);
-    throw new Error(e.message || "Unknown error");
+  } catch (e: unknown) {
+    const code = typeof e === "object" && e !== null ? (e as MaybeErrno).code : undefined;
+    if (code === "ENOENT") throw new Error(`File not found: ${ffmpegPath}`);
+    if (code === "EACCES") throw new Error(`Permission denied: ${ffmpegPath}`);
+    throw new Error(errorMessage(e));
   }
 }
 
@@ -119,13 +135,13 @@ export async function convertVideo(
 
     const result = await readFileAsync(outFile);
     return { data: result.buffer.slice(result.byteOffset, result.byteOffset + result.byteLength), ext: outExt };
-  } catch (e: any) {
-    console.error("[AttachHub] FFmpeg conversion failed:", e.message);
+  } catch (e: unknown) {
+    console.error("[AttachHub] FFmpeg conversion failed:", errorMessage(e));
     return null;
   } finally {
-    try { await unlinkAsync(inFile); } catch (_) {}
-    try { await unlinkAsync(outFile); } catch (_) {}
-    try { fs.rmdirSync(tmpDir); } catch (_) {}
+    try { await unlinkAsync(inFile); } catch {}
+    try { await unlinkAsync(outFile); } catch {}
+    try { fs.rmdirSync(tmpDir); } catch {}
   }
 }
 
@@ -204,12 +220,12 @@ export async function convertImageWithFFmpeg(
     await execFileAsync(opts.ffmpegPath, args, { timeout: 30_000 });
     const result = await readFileAsync(outFile);
     return { data: result.buffer.slice(result.byteOffset, result.byteOffset + result.byteLength), ext: outExt };
-  } catch (e: any) {
-    console.error("[AttachHub] FFmpeg image conversion failed:", e.message);
+  } catch (e: unknown) {
+    console.error("[AttachHub] FFmpeg image conversion failed:", errorMessage(e));
     return null;
   } finally {
-    try { await unlinkAsync(outFile); } catch (_) {}
-    try { fs.rmdirSync(tmpDir); } catch (_) {}
+    try { await unlinkAsync(outFile); } catch {}
+    try { fs.rmdirSync(tmpDir); } catch {}
   }
 }
 
@@ -233,11 +249,11 @@ export async function convertVideoFile(
     await execFileAsync(opts.ffmpegPath, args, { timeout: 120_000 });
     const result = await readFileAsync(outFile);
     return { data: result.buffer.slice(result.byteOffset, result.byteOffset + result.byteLength), ext: outExt };
-  } catch (e: any) {
-    console.error("[AttachHub] FFmpeg file conversion failed:", e.message);
+  } catch (e: unknown) {
+    console.error("[AttachHub] FFmpeg file conversion failed:", errorMessage(e));
     return null;
   } finally {
-    try { await unlinkAsync(outFile); } catch (_) {}
-    try { fs.rmdirSync(tmpDir); } catch (_) {}
+    try { await unlinkAsync(outFile); } catch {}
+    try { fs.rmdirSync(tmpDir); } catch {}
   }
 }

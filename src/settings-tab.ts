@@ -1,4 +1,5 @@
-import { PluginSettingTab, App, Setting, Notice } from "obsidian";
+/* eslint-disable obsidianmd/ui/sentence-case */
+import { PluginSettingTab, App, Setting, Notice, Plugin } from "obsidian";
 import {
   ROOT_LABELS,
   ROOT_OBS,
@@ -7,8 +8,7 @@ import {
 } from "./settings";
 import { testFFmpeg } from "./ffmpeg-handler";
 
-export interface SettingsPlugin {
-  app: App;
+export interface SettingsPlugin extends Plugin {
   settings: AttachmentHubSettings;
   saveSettings(): Promise<void>;
 }
@@ -17,21 +17,21 @@ export class AttachmentHubSettingTab extends PluginSettingTab {
   plugin: SettingsPlugin;
 
   constructor(app: App, plugin: SettingsPlugin) {
-    super(app, plugin as any);
+    super(app, plugin);
     this.plugin = plugin;
   }
 
   display(): void {
     const { containerEl: el } = this;
     el.empty();
-    el.createEl("h2", { text: "Attachment Hub" });
+    ;
 
     // ── 附件存储 ──
-    el.createEl("h3", { text: "附件存储" });
+    new Setting(el).setName("附件存储").setHeading();
 
     new Setting(el)
       .setName("存储位置")
-      .setDesc("新附件的存储位置。「跟随 Obsidian 设置」使用 Vault 的附件文件夹配置。")
+      .setDesc("新附件的存储位置。「跟随 Obsidian 设置」使用 vault 的附件文件夹配置。")
       .addDropdown(d => {
         for (const [k, v] of Object.entries(ROOT_LABELS)) d.addOption(k, v);
         d.setValue(this.plugin.settings.attachPath.saveAttE || ROOT_OBS).onChange(async v => {
@@ -126,7 +126,7 @@ export class AttachmentHubSettingTab extends PluginSettingTab {
       );
 
     // ── 扩展名覆盖 ──
-    el.createEl("h3", { text: "扩展名覆盖" });
+    new Setting(el).setName("扩展名覆盖").setHeading();
     el.createEl("p", {
       text: "针对不同文件扩展名设置独立的命名格式。扩展名支持正则匹配。",
       cls: "setting-item-description",
@@ -150,7 +150,7 @@ export class AttachmentHubSettingTab extends PluginSettingTab {
     );
 
     // ── Frontmatter 同步 ──
-    el.createEl("h3", { text: "Frontmatter 同步" });
+    new Setting(el).setName("Frontmatter 同步").setHeading();
 
     new Setting(el)
       .setName("路径格式")
@@ -163,7 +163,7 @@ export class AttachmentHubSettingTab extends PluginSettingTab {
         });
       });
 
-    el.createEl("h4", { text: "追踪字段" });
+    new Setting(el).setName("追踪字段").setHeading();
     el.createEl("p", {
       text: "包含附件路径的 frontmatter 字段名。",
       cls: "setting-item-description",
@@ -182,7 +182,7 @@ export class AttachmentHubSettingTab extends PluginSettingTab {
     );
 
     // ── 图片处理 ──
-    el.createEl("h3", { text: "图片处理" });
+    new Setting(el).setName("图片处理").setHeading();
 
     new Setting(el)
       .setName("粘贴时转换格式")
@@ -276,7 +276,7 @@ export class AttachmentHubSettingTab extends PluginSettingTab {
     }
 
     // ── FFmpeg / 视频 ──
-    el.createEl("h3", { text: "FFmpeg / 视频" });
+    new Setting(el).setName("FFmpeg / 视频").setHeading();
 
     new Setting(el)
       .setName("FFmpeg 路径")
@@ -301,8 +301,8 @@ export class AttachmentHubSettingTab extends PluginSettingTab {
           try {
             const ver = await testFFmpeg(p);
             new Notice(`FFmpeg 正常：${ver}`);
-          } catch (e: any) {
-            new Notice(`FFmpeg 测试失败：${e.message}`);
+          } catch (e: unknown) {
+            new Notice(`FFmpeg 测试失败：${e instanceof Error ? e.message : String(e)}`);
           }
         }),
       );
@@ -324,7 +324,7 @@ export class AttachmentHubSettingTab extends PluginSettingTab {
     }
 
     // ── 排除规则 ──
-    el.createEl("h3", { text: "排除规则" });
+    new Setting(el).setName("排除规则").setHeading();
 
     new Setting(el)
       .setName("排除扩展名")
@@ -341,7 +341,7 @@ export class AttachmentHubSettingTab extends PluginSettingTab {
 
     new Setting(el)
       .setName("排除路径")
-      .setDesc("逗号分隔的 Vault 路径，这些路径下的文件不会被处理")
+      .setDesc("逗号分隔的 vault 路径，这些路径下的文件不会被处理")
       .addTextArea(t =>
         t
           .setValue(this.plugin.settings.excludedPaths || "")
@@ -367,7 +367,7 @@ export class AttachmentHubSettingTab extends PluginSettingTab {
       );
 
     // ── 其他 ──
-    el.createEl("h3", { text: "其他" });
+    new Setting(el).setName("其他").setHeading();
 
     new Setting(el)
       .setName("关闭通知")

@@ -17,6 +17,15 @@ export const PATH_FMTS: Record<string, string> = {
   wikilink: "Wikilink ![[]]",
 };
 
+export type PathFormat = "plain" | "markdown" | "wikilink";
+
+export function normalizePathFormat(value: string | undefined | null): PathFormat {
+  const v = (value || "").trim().toLowerCase();
+  if (v === "markdown" || v === "markdown ![]()" || v === "![]()") return "markdown";
+  if (v === "wikilink" || v === "wikilink ![[]]" || v === "![[]]") return "wikilink";
+  return "plain";
+}
+
 // ── Type helpers ──
 
 export const NOTE_EXT = new Set(["md", "mdx", "canvas"]);
@@ -227,14 +236,26 @@ export function loadOrigName(
 
 // ── Settings migration ──
 
+interface AMSettings {
+  attachPath?: Partial<AttachPathSettings>;
+  dateFormat?: string;
+  excludeExtensionPattern?: string;
+  excludedPaths?: string;
+  excludePathsArray?: string[];
+  excludeSubpaths?: boolean;
+  originalNameStorage?: OriginalNameEntry[];
+  overridePath?: Record<string, AttachPathSettings>;
+}
+
 export async function migrateFromAM(
   adapter: { exists: (p: string) => Promise<boolean>; read: (p: string) => Promise<string> },
   settings: AttachmentHubSettings,
+  configDir: string,
 ): Promise<boolean> {
   try {
-    const p = normalizePath(".obsidian/plugins/attachment-management/data.json");
+    const p = normalizePath(`${configDir}/plugins/attachment-management/data.json`);
     if (await adapter.exists(p)) {
-      const am = JSON.parse(await adapter.read(p));
+      const am = JSON.parse(await adapter.read(p)) as AMSettings;
       if (am.attachPath) settings.attachPath = { ...DEFAULT_SETTINGS.attachPath, ...am.attachPath };
       if (am.dateFormat) settings.dateFormat = am.dateFormat;
 
@@ -247,6 +268,8 @@ export async function migrateFromAM(
       settings._migrated = true;
       return true;
     }
-  } catch (_) {}
+  } catch (e: unknown) {
+    console.warn("[AttachHub] migrateFromAM failed:", e);
+  }
   return false;
 }
