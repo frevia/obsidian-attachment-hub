@@ -2,6 +2,10 @@
 import { Plugin, TFile, normalizePath } from "obsidian";
 import { AttachmentHubSettings } from "./settings";
 import { normalizePathFormat } from "./settings";
+
+interface HubPlugin extends Plugin {
+  settings: AttachmentHubSettings;
+}
 import {
   pDir,
   parseFM, fmSection, replaceFMField,
@@ -9,26 +13,31 @@ import {
   stripLink, fmtPath,
   extractResolvedPaths,
 } from "./utils";
+import { IndexManager } from "./index-manager";
 
 export class FrontmatterSync {
-  private plugin: Plugin;
-  private settings: AttachmentHubSettings;
+  private plugin: HubPlugin;
+  private _index: IndexManager;
   private _writing: Set<string>;
   private _noteFields: Map<string, Map<string, string>>;
   private _mdxHash: Map<string, string>;
 
   constructor(
-    plugin: Plugin, 
-    settings: AttachmentHubSettings, 
+    plugin: HubPlugin,
+    index: IndexManager,
     writing: Set<string>,
     noteFields: Map<string, Map<string, string>>,
-    mdxHash: Map<string, string>
+    mdxHash: Map<string, string>,
   ) {
     this.plugin = plugin;
-    this.settings = settings;
+    this._index = index;
     this._writing = writing;
     this._noteFields = noteFields;
     this._mdxHash = mdxHash;
+  }
+
+  private get settings(): AttachmentHubSettings {
+    return this.plugin.settings;
   }
 
   async onFMChange(file: TFile): Promise<void> {
@@ -252,15 +261,14 @@ export class FrontmatterSync {
   }
 
   private updateNoteIndex(notePath: string, newMap: Map<string, string> | null): void {
-    // This will be implemented in the main plugin
+    this._index.updateNoteIndex(notePath, newMap);
   }
 
   private getNotesFor(ap: string): Set<string> {
-    // This will be implemented in the main plugin
-    return new Set();
+    return this._index.getNotesFor(ap);
   }
 
   private removeFromIndex(ap: string): void {
-    // This will be implemented in the main plugin
+    this._index.removeFromIndex(ap);
   }
 }
