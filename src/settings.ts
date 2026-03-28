@@ -20,9 +20,21 @@ export const PATH_FMTS: Record<string, string> = {
 export type PathFormat = "plain" | "markdown" | "wikilink";
 
 export function normalizePathFormat(value: string | undefined | null): PathFormat {
-  const v = (value || "").trim().toLowerCase();
-  if (v === "markdown" || v === "markdown ![]()" || v === "![]()") return "markdown";
-  if (v === "wikilink" || v === "wikilink ![[]]" || v === "![[]]") return "wikilink";
+  const raw = String(value ?? "").replace(/^\uFEFF/, "").trim();
+  if (!raw) return "plain";
+  const v = raw.toLowerCase();
+
+  if (v === "plain") return "plain";
+  if (v === "markdown") return "markdown";
+  if (v === "wikilink") return "wikilink";
+
+  if (v === "markdown ![]()" || v === "![]()") return "markdown";
+  if (v === "wikilink ![[]]" || v === "![[]]") return "wikilink";
+
+  for (const [key, label] of Object.entries(PATH_FMTS)) {
+    if (label.toLowerCase() === v) return key as PathFormat;
+  }
+
   return "plain";
 }
 

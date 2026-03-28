@@ -81,7 +81,7 @@ export default class AttachmentHubPlugin extends Plugin {
     // Initialize managers
     this.indexManager = new IndexManager(this.app, this.settings, this._idx, this._noteFields);
     this.attachmentProcessor = new AttachmentProcessor(this, this.settings, this._writing);
-    this.frontmatterSync = new FrontmatterSync(this, this.settings, this._writing, this._noteFields, this._mdxHash);
+    this.frontmatterSync = new FrontmatterSync(this, this.indexManager, this._writing, this._noteFields, this._mdxHash);
     this.eventHandlers = new EventHandlers(
       this, 
       this.settings, 
@@ -746,10 +746,8 @@ export default class AttachmentHubPlugin extends Plugin {
         const dst = normalizePath(pJoin(attachDir, dedupName));
         await this.app.vault.createBinary(dst, clip.buf);
         const rel = relative(pDir(noteFile.path), dst);
-        console.debug("[AttachHub] pathFormat:", this.settings.pathFormat, "rel:", rel);
         const formatMode = normalizePathFormat(this.settings.pathFormat);
         const fmt = formatMode === "plain" ? rel : fmtPath(rel, formatMode);
-        console.debug("[AttachHub] formatted:", fmt);
         this._writing.add(noteFile.path);
         try { await writeFM(this.app, noteFile, { [field]: fmt }); } finally {
           setTimeout(() => this._writing.delete(noteFile.path), 2000);

@@ -99,7 +99,13 @@ const RE_WL2 = /^\[\[(.*?)(?:\|.*)?\]\]$/;
 export function stripLink(v: string): string | null {
   if (typeof v !== "string") return null;
   let m = v.match(RE_MDL);
-  if (m) return decodeURIComponent(m[1]);
+  if (m) {
+    try {
+      return decodeURIComponent(m[1]);
+    } catch {
+      return m[1];
+    }
+  }
   m = v.match(RE_WL);
   if (m) return m[1];
   m = v.match(RE_WL2);
