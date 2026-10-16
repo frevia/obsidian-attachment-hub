@@ -2,6 +2,8 @@
 
 Obsidian 全能附件管理插件：自动重命名、格式转换、路径同步，一个插件搞定所有附件需求。
 
+仅支持桌面端 Obsidian。图片处理在本地完成，不上传附件。
+
 ## 功能
 
 ### 附件管理
@@ -17,13 +19,19 @@ Obsidian 全能附件管理插件：自动重命名、格式转换、路径同�
 - **格式转换**：粘贴/拖拽时自动转换为 WEBP、JPEG 或 PNG
 - **质量压缩**：可调节压缩质量（1-100）
 - **尺寸调整**：按最大宽度/高度/长边/短边自动缩放
-- **HEIC 支持**：自动解码 HEIC/HEIF 图片（静态图使用 heic2any，动态实况图走 FFmpeg）
+- **HEIC 支持**：macOS 静态图优先使用系统 ImageIO（`sips`）解码，其他平台或系统解码失败时使用 heic2any；动态图走 FFmpeg
 - **EXIF 保留**：可选保留相机参数，GPS 位置信息独立开关
+
+转换先创建并校验新文件，再原子更新笔记引用；成功后将原图移入回收站。失败时保留原图，已生成的新文件也不会被直接删除。其他笔记仍引用原图时保留两份文件。重复粘贴会检查实际目标，自动添加数字后缀。
+
+目标格式与原图相同时，仍按设置执行缩放和压缩。关闭 GPS 保留会清理 EXIF、XMP 中的 GPS 字段；启用 EXIF 保留但工具不可用时会停止转换并提示，不以丢失元数据的文件替换原图。
 
 ### 视频处理
 
 - **FFmpeg 集成**：配置系统 FFmpeg 路径，支持 MP4、MOV、AVI、MKV、WEBM 转换
 - **视频转动图**：转换为 Animated WEBP 或 GIF
+
+静态 HEIC 转 WebP 需将「图片转换」的目标设为 WebP；「视频转换」的 WebP 设置仅作用于视频和动态图。macOS 静态 HEIC 的解码与 WebP 编码不依赖 FFmpeg，因此 FFmpeg 未编译 `libwebp` 时仍可转换。解码失败会提示并保留原图。
 
 ### Frontmatter 路径同步
 
@@ -33,6 +41,9 @@ Obsidian 全能附件管理插件：自动重命名、格式转换、路径同�
 - **附件重命名同步**：附件移动/重命名时同步更新所有引用
 - **删除清理**：附件删除时自动清空对应的 frontmatter 字段
 - **剪贴板粘贴**：通过命令将剪贴板图片直接粘贴到 frontmatter 字段
+- **保留正文与嵌套属性**：通过 Obsidian 原子更新接口写入，无 frontmatter 的笔记会自动创建属性块
+
+「扫描并修复」只自动修复唯一匹配的附件文件名，遇到多个同名文件会跳过并报告数量。
 
 ### 排除规则
 
@@ -43,7 +54,7 @@ Obsidian 全能附件管理插件：自动重命名、格式转换、路径同�
 
 ### 从源码构建
 
-确保已安装 Node.js（>= v16）。
+确保已安装 Node.js（>= v18）。启用 EXIF 保留需要 Perl 或系统安装的 ExifTool；macOS 通常自带 Perl，Windows 可安装系统 ExifTool。
 
 ```bash
 # 克隆仓库
@@ -75,6 +86,7 @@ ln -s /path/to/obsidian-attachment-hub /path/to/vault/.obsidian/plugins/attachme
 - `main.js`
 - `manifest.json`
 - `styles.css`
+- `vendor/`（构建生成，包含 ExifTool 入口及完整 `lib/`；必须整体复制）
 
 然后在 Obsidian 设置 → 第三方插件 中启用 **Attachment Hub**。
 
@@ -91,14 +103,17 @@ ln -s /path/to/obsidian-attachment-hub /path/to/vault/.obsidian/plugins/attachme
 
 ```text
 src/
-├── main.ts              # 插件主入口，事件处理和核心逻辑
+├── main.ts              # 插件生命周期、命令和设置加载
+├── event-handlers.ts    # 文件与元数据事件、粘贴检测
+├── attachment-processor.ts # 附件转换、命名和引用更新
+├── frontmatter-sync.ts  # Frontmatter 与移动路径同步
+├── index-manager.ts     # 附件引用索引
 ├── settings.ts          # 设置接口、默认值、类型工具
 ├── settings-tab.ts      # 设置界面 UI
 ├── modals.ts            # 弹窗（字段选择、确认、覆盖设置）
 ├── utils.ts             # 工具函数（路径、MD5、变量替换、frontmatter 读写）
 ├── image-processor.ts   # 图片格式检测与 Canvas API 转换
-├── heic-handler.ts      # HEIC/HEIF 静态图解码（heic2any）
-├── tiff-handler.ts      # TIFF 解码（utif2，待集成）
+├── heic-handler.ts      # HEIC/HEIF 静态图解码（macOS sips / heic2any）
 ├── ffmpeg-handler.ts    # FFmpeg 系统调用（视频/动态图转换）
 └── types.d.ts           # 第三方模块类型声明
 ```
@@ -114,7 +129,12 @@ npm run build
 
 # 代码检查
 npm run lint
+
+# 转换流程回归测试（不修改 Vault）
+npm test
 ```
+
+CI 会运行构建、lint 和回归测试。测试使用隔离数据，不修改真实 Vault；元数据测试使用随包工具验证 EXIF/XMP GPS 清理。停用或重载插件会取消待检测笔记和排队任务；已经开始的系统转换允许结束，但旧实例不会继续提交后续笔记更新或删除原图。
 
 ## 许可
 

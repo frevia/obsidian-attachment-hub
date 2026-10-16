@@ -27,37 +27,6 @@ export class FieldPicker extends SuggestModal<string> {
   }
 }
 
-export class ConfirmModal extends Modal {
-  private title_: string;
-  private msg: string;
-  private onConfirm: () => void;
-
-  constructor(app: App, title: string, msg: string, onConfirm: () => void) {
-    super(app);
-    this.title_ = title;
-    this.msg = msg;
-    this.onConfirm = onConfirm;
-  }
-
-  onOpen(): void {
-    const { contentEl } = this;
-    contentEl.createEl("h3", { text: this.title_ });
-    contentEl.createEl("p", { text: this.msg });
-    new Setting(contentEl)
-      .addButton(b => b.setButtonText("取消").onClick(() => this.close()))
-      .addButton(b =>
-        b.setButtonText("继续").setCta().onClick(() => {
-          this.close();
-          this.onConfirm();
-        }),
-      );
-  }
-
-  onClose(): void {
-    this.contentEl.empty();
-  }
-}
-
 export interface OverridePlugin {
   app: App;
   settings: { overridePath: Record<string, AttachPathSettings> };

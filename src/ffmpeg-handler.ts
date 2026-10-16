@@ -1,4 +1,4 @@
-/* eslint-disable import/no-nodejs-modules, no-undef, no-empty */
+/* eslint-disable no-undef, no-empty */
 /**
  * FFmpeg handler using system-installed FFmpeg binary.
  * Supports: animated HEIF → WEBP, MP4/MOV → WEBP/GIF, and general video conversion.
@@ -68,25 +68,15 @@ async function hasExiftool(): Promise<boolean> {
 }
 
 async function copyMetadataWithExiftool(inputFile: string, outputFile: string, keepGps: boolean): Promise<void> {
-  if (!(await hasExiftool())) return;
+  if (!(await hasExiftool())) throw new Error("ExifTool is unavailable; metadata could not be preserved");
   const args = ["-overwrite_original", "-TagsFromFile", inputFile, "-all:all"];
-  if (!keepGps) args.push("-gps:all=", "-xmp:geotag=");
+  if (!keepGps) args.push("-all:GPS*=", "-QuickTime:GPSCoordinates=", "-xmp:geotag=");
   args.push("-P");
-  try {
-    if (!exiftoolPath) return;
-    await execFileAsync(exiftoolPath, [...args, outputFile], { timeout: 20_000 });
-  } catch (e: unknown) {
-    console.warn("[AttachHub] exiftool metadata copy failed:", errorMessage(e));
-  }
+  if (!exiftoolPath) throw new Error("ExifTool is unavailable; metadata could not be preserved");
+  await execFileAsync(exiftoolPath, [...args, outputFile], { timeout: 20_000 });
 }
 
 export type VideoTarget = "webp" | "gif" | "disabled";
-
-export const VIDEO_EXT = new Set(["mp4", "mov", "avi", "mkv", "webm"]);
-
-export function isVideoExt(ext: string): boolean {
-  return VIDEO_EXT.has(ext.toLowerCase());
-}
 
 /**
  * Detect whether a HEIC/HEIF file contains animation (Live Photo / image sequence).
@@ -167,54 +157,13 @@ interface ConvertOpts {
   preserveGps?: boolean;
 }
 
-export async function convertVideo(
-  inputData: ArrayBuffer,
-  inputExt: string,
-  opts: ConvertOpts,
-): Promise<{ data: ArrayBuffer; ext: string } | null> {
-  if (opts.target === "disabled" || !opts.ffmpegPath) return null;
-
-  const tmpDir = await mkdtempAsync(path.join(os.tmpdir(), "attachhub-"));
-  const inFile = path.join(tmpDir, `input.${inputExt}`);
-  const outExt = opts.target;
-  const outFile = path.join(tmpDir, `output.${outExt}`);
-
-  try {
-    await writeFileAsync(inFile, Buffer.from(inputData));
-
-    const args = buildFFmpegArgs(inFile, outFile, inputExt, opts);
-    await execFileAsync(opts.ffmpegPath, args, { timeout: 120_000 });
-    if (opts.preserveExif) await copyMetadataWithExiftool(inFile, outFile, Boolean(opts.preserveGps));
-
-    const result = await readFileAsync(outFile);
-    return { data: result.buffer.slice(result.byteOffset, result.byteOffset + result.byteLength), ext: outExt };
-  } catch (e: unknown) {
-    console.error("[AttachHub] FFmpeg conversion failed:", errorMessage(e));
-    return null;
-  } finally {
-    try { await unlinkAsync(inFile); } catch {}
-    try { await unlinkAsync(outFile); } catch {}
-    try { fs.rmdirSync(tmpDir); } catch {}
-  }
-}
-
 function buildFFmpegArgs(
   inFile: string,
   outFile: string,
-  inputExt: string,
   opts: ConvertOpts,
 ): string[] {
-  const args = ["-y", "-i", inFile];
+  const args = ["-y", "-i", inFile, "-map_metadata", "-1"];
   const q = Math.max(1, Math.min(100, opts.quality));
-  if (opts.preserveExif) {
-    args.push("-map_metadata", "0");
-    if (!opts.preserveGps) {
-      // Best effort: strip common location metadata tags while keeping other EXIF fields.
-      args.push("-metadata", "location=");
-      args.push("-metadata", "location-eng=");
-      args.push("-metadata", "com.apple.quicktime.location.ISO6709=");
-    }
-  }
 
   if (opts.target === "webp") {
     args.push("-vcodec", "libwebp");
@@ -242,66 +191,6 @@ function buildFFmpegArgs(
   return args;
 }
 
-export interface StillConvertOpts {
-  ffmpegPath: string;
-  targetExt: string;   // "webp" | "jpg" | "png"
-  quality: number;
-  resizeValue?: number;
-  preserveExif?: boolean;
-  preserveGps?: boolean;
-}
-
-/**
- * Convert a still image (e.g. HEIC) to a standard format using FFmpeg.
- * Extracts a single frame — no animation, no loop.
- */
-export async function convertImageWithFFmpeg(
-  absPath: string,
-  opts: StillConvertOpts,
-): Promise<{ data: ArrayBuffer; ext: string } | null> {
-  if (!opts.ffmpegPath) return null;
-
-  const tmpDir = await mkdtempAsync(path.join(os.tmpdir(), "attachhub-"));
-  const outExt = opts.targetExt;
-  const outFile = path.join(tmpDir, `output.${outExt}`);
-
-  try {
-    const args = ["-y", "-i", absPath, "-frames:v", "1"];
-    const q = Math.max(1, Math.min(100, opts.quality));
-    if (opts.preserveExif) {
-      args.push("-map_metadata", "0");
-      if (!opts.preserveGps) {
-        args.push("-metadata", "location=");
-        args.push("-metadata", "location-eng=");
-        args.push("-metadata", "com.apple.quicktime.location.ISO6709=");
-      }
-    }
-
-    if (outExt === "webp") {
-      args.push("-vcodec", "libwebp", "-lossless", "0", "-q:v", String(q));
-    } else if (outExt === "jpg") {
-      args.push("-q:v", String(Math.round(31 - (q / 100) * 29)));
-    }
-    // png needs no quality flag
-
-    if (opts.resizeValue && opts.resizeValue > 0) {
-      args.push("-vf", `scale='min(${opts.resizeValue},iw)':'min(${opts.resizeValue},ih)':force_original_aspect_ratio=decrease`);
-    }
-
-    args.push(outFile);
-    await execFileAsync(opts.ffmpegPath, args, { timeout: 30_000 });
-    if (opts.preserveExif) await copyMetadataWithExiftool(absPath, outFile, Boolean(opts.preserveGps));
-    const result = await readFileAsync(outFile);
-    return { data: result.buffer.slice(result.byteOffset, result.byteOffset + result.byteLength), ext: outExt };
-  } catch (e: unknown) {
-    console.error("[AttachHub] FFmpeg image conversion failed:", errorMessage(e));
-    return null;
-  } finally {
-    try { await unlinkAsync(outFile); } catch {}
-    try { fs.rmdirSync(tmpDir); } catch {}
-  }
-}
-
 /**
  * Convert a video file that already exists on disk (by vault absolute path).
  * Returns the converted data + new extension, or null if conversion not needed/failed.
@@ -318,7 +207,7 @@ export async function convertVideoFile(
   const outFile = path.join(tmpDir, `output.${outExt}`);
 
   try {
-    const args = buildFFmpegArgs(absPath, outFile, inputExt, opts);
+    const args = buildFFmpegArgs(absPath, outFile, opts);
     await execFileAsync(opts.ffmpegPath, args, { timeout: 120_000 });
     if (opts.preserveExif) await copyMetadataWithExiftool(absPath, outFile, Boolean(opts.preserveGps));
     const result = await readFileAsync(outFile);
@@ -343,7 +232,6 @@ export async function copyMetadataToBuffer(
   outputExt: string,
   keepGps: boolean,
 ): Promise<ArrayBuffer> {
-  if (!(await hasExiftool())) return outputData;
   const tmpDir = await mkdtempAsync(path.join(os.tmpdir(), "attachhub-meta-"));
   const safeSourceExt = (sourceExt || "bin").replace(/[^a-z0-9]/gi, "").toLowerCase() || "bin";
   const srcFile = path.join(tmpDir, `source.${safeSourceExt}`);
@@ -354,9 +242,6 @@ export async function copyMetadataToBuffer(
     await copyMetadataWithExiftool(srcFile, outFile, keepGps);
     const result = await readFileAsync(outFile);
     return result.buffer.slice(result.byteOffset, result.byteOffset + result.byteLength);
-  } catch (e: unknown) {
-    console.warn("[AttachHub] metadata buffer copy failed:", errorMessage(e));
-    return outputData;
   } finally {
     try { await unlinkAsync(srcFile); } catch {}
     try { await unlinkAsync(outFile); } catch {}

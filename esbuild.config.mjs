@@ -2,8 +2,9 @@ import esbuild from "esbuild";
 import process from "process";
 import { builtinModules } from 'node:module';
 import { createRequire } from "node:module";
-import { mkdir, copyFile, chmod } from "node:fs/promises";
+import { mkdir, copyFile, chmod, cp } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const banner =
 `/*
@@ -14,30 +15,31 @@ if you want to view the source, please visit the github repository of this plugi
 
 const prod = (process.argv[2] === "production");
 const require = createRequire(import.meta.url);
+const sourceDir = path.dirname(fileURLToPath(import.meta.url));
+const buildOutDir = path.resolve(process.env.ATTACHHUB_BUILD_OUTDIR || process.cwd());
 
 async function copyVendoredExiftool() {
-	try {
-		const src = require.resolve("exiftool-vendored.pl/bin/exiftool");
-		const dstDir = path.join(process.cwd(), "vendor");
-		const dst = path.join(dstDir, "exiftool");
-		await mkdir(dstDir, { recursive: true });
-		await copyFile(src, dst);
-		await chmod(dst, 0o755);
-		console.log("[build] copied vendored exiftool -> vendor/exiftool");
-	} catch (e) {
-		console.warn("[build] failed to copy vendored exiftool:", e);
-	}
+	const src = require.resolve("exiftool-vendored.pl/bin/exiftool");
+	const srcDir = path.dirname(src);
+	const dstDir = path.join(buildOutDir, "vendor");
+	const dst = path.join(dstDir, "exiftool");
+	await mkdir(dstDir, { recursive: true });
+	await copyFile(src, dst);
+	await chmod(dst, 0o755);
+	await cp(path.join(srcDir, "lib"), path.join(dstDir, "lib"), { recursive: true, force: true });
+	console.log("[build] copied vendored exiftool and lib -> vendor/");
 }
 
 const context = await esbuild.context({
 	banner: {
 		js: banner,
 	},
-	entryPoints: ["src/main.ts"],
+	entryPoints: [path.join(sourceDir, "src/main.ts")],
 	bundle: true,
 	external: [
 		"obsidian",
 		"electron",
+		"node:*",
 		"@codemirror/autocomplete",
 		"@codemirror/collab",
 		"@codemirror/commands",
@@ -55,7 +57,7 @@ const context = await esbuild.context({
 	logLevel: "info",
 	sourcemap: prod ? false : "inline",
 	treeShaking: true,
-	outfile: "main.js",
+	outfile: path.join(buildOutDir, "main.js"),
 	minify: prod,
 });
 

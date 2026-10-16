@@ -1,47 +1,17 @@
 import { TFile } from "obsidian";
-import { pBase, pDotExt } from "./path-utils";
-
-// Use Web Crypto API for browser compatibility
-function createMD5Hash(data: ArrayBuffer): Promise<string> {
-  return self.crypto.subtle.digest('MD5', data)
-    .then(buffer => {
-      const hex = Array.from(new Uint8Array(buffer))
-        .map(b => b.toString(16).padStart(2, '0'))
-        .join('');
-      return hex.toUpperCase();
-    })
-    .catch(() => '');
-}
-
-// Cache for folder contents to avoid frequent file system operations
-const folderCache = new Map<string, { files: string[]; timestamp: number }>();
-const CACHE_DURATION = 30000; // 30 seconds cache
-
-// Cache for MD5 hashes to avoid re-computing for the same file
-const md5Cache = new Map<string, { hash: string; timestamp: number }>();
+import { createHash } from "node:crypto";
+import { pDotExt } from "./path-utils";
 
 // ══════════════════════════════════════════════════════════════
 // MD5
 // ══════════════════════════════════════════════════════════════
 
 export async function md5sum(adapter: unknown, file: TFile): Promise<string> {
-  const now = Date.now();
-  const cacheKey = file.path;
-  const cache = md5Cache.get(cacheKey);
-  
-  // Check if we have a valid cached MD5 hash
-  if (cache && now - cache.timestamp < CACHE_DURATION) {
-    return cache.hash;
-  }
-  
-  // Calculate MD5 hash and update cache
   try {
     const buf = await (adapter as { readBinary(path: string): Promise<ArrayBuffer> }).readBinary(file.path);
-    const hash = await createMD5Hash(buf);
-    md5Cache.set(cacheKey, { hash, timestamp: now });
-    return hash;
-  } catch {
-    return "";
+    return createHash("md5").update(new Uint8Array(buf)).digest("hex").toUpperCase();
+  } catch (error) {
+    throw new Error(`Unable to calculate MD5 for ${file.path}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -49,42 +19,25 @@ export async function md5sum(adapter: unknown, file: TFile): Promise<string> {
 // Deduplication
 // ══════════════════════════════════════════════════════════════
 
-export async function dedup(name: string, folderPath: string, adapter: unknown): Promise<string> {
-  const now = Date.now();
-  const cache = folderCache.get(folderPath);
-  
-  let listed: { files: string[] };
-  if (cache && now - cache.timestamp < CACHE_DURATION) {
-    // Use cached folder contents
-    listed = { files: cache.files };
-  } else {
-    // Fetch fresh folder contents
-    try {
-      listed = await (adapter as { list(path: string): Promise<{ files: string[] }> }).list(folderPath);
-      // Update cache
-      folderCache.set(folderPath, { files: listed.files, timestamp: now });
-    } catch {
-      return name;
-    }
-  }
-  
+export async function dedup(
+  name: string,
+  folderPath: string,
+  adapter: unknown,
+  ignorePath?: string,
+): Promise<string> {
+  const fileAdapter = adapter as { exists(path: string, caseSensitive?: boolean): Promise<boolean> };
+  const targetPath = (candidate: string) => folderPath ? `${folderPath.replace(/\/$/, "")}/${candidate}` : candidate;
+  const available = async (candidate: string): Promise<boolean> => {
+    const path = targetPath(candidate);
+    return path === ignorePath || !(await fileAdapter.exists(path, true));
+  };
+  if (await available(name)) return name;
   const dotExt = pDotExt(name);
   const stem = name.slice(0, name.length - dotExt.length);
-  const esc = stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`^${esc}-(\\d{1,3})\\${dotExt}$`);
-  let exists = false;
-  const nums: number[] = [];
-  for (let sib of listed.files) {
-    sib = pBase(sib);
-    if (sib === name) {
-      exists = true;
-      continue;
-    }
-    const m = re.exec(sib);
-    if (m) nums.push(parseInt(m[1]));
+  for (let suffix = 1; ; suffix++) {
+    const candidate = `${stem}-${suffix}${dotExt}`;
+    if (await available(candidate)) return candidate;
   }
-  if (exists) return `${stem}-${nums.length ? Math.max(...nums) + 1 : 1}${dotExt}`;
-  return name;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -99,6 +52,8 @@ const MIME_EXT: Record<string, string> = {
   "image/bmp": "bmp",
   "image/svg+xml": "svg",
   "image/avif": "avif",
+  "image/heic": "heic",
+  "image/heif": "heif",
 };
 
 export async function clipImage(): Promise<{ buf: ArrayBuffer; ext: string } | null> {

@@ -1,6 +1,6 @@
-import { App, TFile, normalizePath } from "obsidian";
-import { AttachmentHubSettings } from "./settings";
-import { extractResolvedPaths } from "./utils";
+import { App, normalizePath } from "obsidian";
+import { AttachmentHubSettings, isNote } from "./settings";
+import { extractResolvedPaths, pDir } from "./utils";
 
 export class IndexManager {
   private app: App;
@@ -19,11 +19,11 @@ export class IndexManager {
     this._idx.clear();
     this._noteFields.clear();
     for (const f of this.app.vault.getFiles()) {
-      if (!this.isNote(f)) continue;
+      if (!isNote(f)) continue;
       const c = this.app.metadataCache.getFileCache(f);
       const fm = c?.frontmatter;
       if (!fm) continue;
-      const map = extractResolvedPaths(fm, this.settings.trackedFields, this.pDir(f.path));
+      const map = extractResolvedPaths(fm, this.settings.trackedFields, pDir(f.path));
       if (map.size) {
         this._noteFields.set(f.path, map);
         for (const aPath of map.values()) {
@@ -67,13 +67,4 @@ export class IndexManager {
     this._idx.delete(normalizePath(ap));
   }
 
-  // Helper methods
-  private isNote(f: unknown): f is TFile {
-    return f instanceof TFile && (f.extension === "md" || f.extension === "mdx" || f.extension === "canvas");
-  }
-
-  private pDir(p: string): string {
-    const i = p.lastIndexOf("/");
-    return i < 0 ? "" : p.substring(0, i);
-  }
 }

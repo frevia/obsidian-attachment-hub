@@ -83,12 +83,6 @@ export function shouldConvertImageExt(settings: AttachmentHubSettings, ext: stri
 export function matchExt(ext: string, pat: string): boolean {
   return pat ? new RegExp(pat).test(ext) : false;
 }
-export function isAttachFile(settings: AttachmentHubSettings, f: unknown): boolean {
-  if (!(f instanceof TFile)) return false;
-  if (NOTE_EXT.has(f.extension)) return false;
-  return !matchExt(f.extension, settings.excludeExtensionPattern);
-}
-
 // ── Extension override ──
 
 export interface ExtensionOverride {
@@ -252,16 +246,6 @@ export function saveOrigName(
     settings.originalNameStorage = settings.originalNameStorage.filter(n => n.md5 !== data.md5);
     settings.originalNameStorage.push(data);
   }
-}
-
-export function loadOrigName(
-  settings: AttachmentHubSettings,
-  setting: AttachPathSettings,
-  ext: string,
-  md5: string,
-): OriginalNameEntry | undefined {
-  if (!containsOrigVar(setting, ext) || !settings.originalNameStorage) return undefined;
-  return settings.originalNameStorage.find(d => d.md5 === md5);
 }
 
 // ── Settings migration ──
