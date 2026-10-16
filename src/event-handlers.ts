@@ -1,58 +1,34 @@
 /* eslint-disable @typescript-eslint/no-floating-promises, no-empty */
-import { Plugin, TFile, TFolder, normalizePath } from "obsidian";
+import { Plugin, TFile, TFolder } from "obsidian";
 import {
   AttachmentHubSettings,
-  AttachPathSettings,
   isNote,
   isAttach,
   updateOverridePath,
   isExcluded,
   NOTE_EXT,
   getOverride,
+  matchExt,
 } from "./settings";
 import { AttachmentProcessor } from "./attachment-processor";
 import { FrontmatterSync } from "./frontmatter-sync";
 import { IndexManager } from "./index-manager";
 import { OverrideModal } from "./modals";
-import { debounce } from "./utils";
+import {
+  getAttachmentFolderPath,
+  getRootPath,
+  isEmptyFolder,
+  pBase,
+  pDir,
+  pJoin,
+  pStem,
+  relative,
+  resolveVars,
+} from "./utils";
 
 interface OverridePlugin extends Plugin {
   settings: AttachmentHubSettings;
   saveSettings(): Promise<void>;
-}
-
-interface AdapterWithList {
-  list: (path: string) => Promise<{ files: unknown[]; folders: unknown[] }>;
-}
-
-interface VarCtx {
-  dateFormat?: string;
-  noteName?: string;
-  noteDir?: string;
-  parentName?: string;
-  origName?: string;
-  md5?: string;
-}
-
-function getAttachmentFolderPath(app: unknown): string {
-  if (typeof app !== "object" || app === null) return "";
-  if ("getConfig" in app && typeof (app as { getConfig?: unknown }).getConfig === "function") {
-    const value = (app as { getConfig: (key: string) => unknown }).getConfig("attachmentFolderPath");
-    if (typeof value === "string") return value;
-  }
-  if ("vault" in app) {
-    const vault = (app as { vault?: unknown }).vault;
-    if (
-      typeof vault === "object" &&
-      vault !== null &&
-      "getConfig" in vault &&
-      typeof (vault as { getConfig?: unknown }).getConfig === "function"
-    ) {
-      const value = (vault as { getConfig: (key: string) => unknown }).getConfig("attachmentFolderPath");
-      if (typeof value === "string") return value;
-    }
-  }
-  return "";
 }
 
 export class EventHandlers {
@@ -64,7 +40,10 @@ export class EventHandlers {
   private _createQ: TFile[];
   private _writing: Set<string>;
   private _modTimers: Record<string, ReturnType<typeof setTimeout>>;
-  private _debouncedPasteDetect: (file: TFile) => void;
+  private _pendingPasteNotes = new Set<TFile>();
+  private _pasteTimer: ReturnType<typeof setTimeout> | null = null;
+  private _pasteTask: Promise<void> = Promise.resolve();
+  private _disposed = false;
 
   constructor(
     plugin: OverridePlugin,
@@ -84,10 +63,28 @@ export class EventHandlers {
     this._createQ = createQ;
     this._writing = writing;
     this._modTimers = modTimers;
-    
-    // Create debounced version of paste detection
-    this._debouncedPasteDetect = debounce((file: TFile) => {
-      this._handlePasteDetect(file);
+  }
+
+  dispose(): void {
+    if (this._disposed) return;
+    this._disposed = true;
+    if (this._pasteTimer !== null) clearTimeout(this._pasteTimer);
+    this._pasteTimer = null;
+    this._pendingPasteNotes.clear();
+    for (const timer of Object.values(this._modTimers)) clearTimeout(timer);
+    for (const key of Object.keys(this._modTimers)) delete this._modTimers[key];
+  }
+
+  private _schedulePasteDetect(file: TFile): void {
+    if (this._disposed) return;
+    this._pendingPasteNotes.add(file);
+    if (this._pasteTimer !== null) clearTimeout(this._pasteTimer);
+    this._pasteTimer = setTimeout(() => {
+      this._pasteTimer = null;
+      if (this._disposed) return;
+      const notes = [...this._pendingPasteNotes];
+      this._pendingPasteNotes.clear();
+      for (const note of notes) void this._handlePasteDetect(note);
     }, 300);
   }
 
@@ -95,9 +92,11 @@ export class EventHandlers {
     // File create event
     this.plugin.registerEvent(
       this.plugin.app.vault.on("create", (file) => {
+        if (this._disposed) return;
         if (!(file instanceof TFile) || NOTE_EXT.has(file.extension)) return;
+        if (this.attachmentProcessor.consumeCreated(file.path)) return;
         if (Date.now() - file.stat.ctime > 1000) return;
-        if (this.matchExt(file.extension, this.settings.excludeExtensionPattern)) return;
+        if (matchExt(file.extension, this.settings.excludeExtensionPattern)) return;
         this._createQ.push(file);
       }),
     );
@@ -105,12 +104,15 @@ export class EventHandlers {
     // File modify event
     this.plugin.registerEvent(
       this.plugin.app.vault.on("modify", (file) => {
-        if (!(file instanceof TFile) || !isNote(file) || this._writing.has(file.path)) return;
-        if (this._createQ.length > 0) this._debouncedPasteDetect(file);
+        if (this._disposed) return;
+        if (!(file instanceof TFile) || !isNote(file)) return;
+        if (this._createQ.length > 0) this._schedulePasteDetect(file);
+        if (this._writing.has(file.path)) return;
         if (file.extension === "mdx") {
           if (this._modTimers[file.path]) clearTimeout(this._modTimers[file.path]);
           this._modTimers[file.path] = setTimeout(() => {
             delete this._modTimers[file.path];
+            if (this._disposed) return;
             this.frontmatterSync.onMdxModify(file);
           }, 600);
         }
@@ -120,6 +122,7 @@ export class EventHandlers {
     // Metadata cache changed event
     this.plugin.registerEvent(
       this.plugin.app.metadataCache.on("changed", (file) => {
+        if (this._disposed) return;
         if (!(file instanceof TFile) || !isNote(file) || this._writing.has(file.path)) return;
         if (file.extension !== "md") return;
         // During paste/import bursts, defer FM normalization to avoid intermediate
@@ -129,6 +132,7 @@ export class EventHandlers {
           if (this._modTimers[timerKey]) clearTimeout(this._modTimers[timerKey]);
           this._modTimers[timerKey] = setTimeout(() => {
             delete this._modTimers[timerKey];
+            if (this._disposed) return;
             if (!this._writing.has(file.path)) void this.frontmatterSync.onFMChange(file);
           }, 900);
           return;
@@ -140,10 +144,12 @@ export class EventHandlers {
     // File rename event
     this.plugin.registerEvent(
       this.plugin.app.vault.on("rename", async (file, oldPath) => {
+        if (this._disposed) return;
         const ovr = this.settings.overridePath[oldPath];
         if (ovr) {
           updateOverridePath(this.settings, file.path, oldPath);
           await this.plugin.saveSettings();
+          if (this._disposed) return;
         }
         if (file instanceof TFile && isNote(file)) {
           this.indexManager.removeNoteFromIndex(oldPath);
@@ -158,11 +164,13 @@ export class EventHandlers {
     // File delete event
     this.plugin.registerEvent(
       this.plugin.app.vault.on("delete", async (file) => {
+        if (this._disposed) return;
         if (isNote(file)) {
           this.indexManager.removeNoteFromIndex(file.path);
           if (this.settings.overridePath[file.path]) {
             delete this.settings.overridePath[file.path];
             await this.plugin.saveSettings();
+            if (this._disposed) return;
           }
           this._cleanOldAttachFolder(file.path);
           return;
@@ -174,11 +182,13 @@ export class EventHandlers {
     // File menu event
     this.plugin.registerEvent(
       this.plugin.app.workspace.on("file-menu", (menu, file) => {
+        if (this._disposed) return;
         if ((file instanceof TFile && file.parent && isExcluded(file.parent.path, this.settings)) || isAttach(file))
           return;
         menu.addItem(item => {
           item.setTitle("Override attachment setting").setIcon("image-plus").onClick(() => {
-            const s = { ...this.getOverride(this.settings, file.path) };
+            if (this._disposed) return;
+            const s = { ...getOverride(this.settings, file.path) };
             new OverrideModal(this.plugin, file as TFile | TFolder, s).open();
           });
         });
@@ -186,144 +196,58 @@ export class EventHandlers {
     );
   }
 
-  private async _handlePasteDetect(noteFile: TFile): Promise<void> {
-    const f = this._createQ[0];
-    if (!f) return;
-    try {
-      if (!(await this.plugin.app.vault.adapter.exists(f.path))) {
-        this._createQ.shift();
-        return;
+  private _handlePasteDetect(noteFile: TFile): Promise<void> {
+    // Link updates must finish before another paste detection processes the same note.
+    this._pasteTask = this._pasteTask.then(async () => {
+      if (this._disposed) return;
+      for (const f of [...this._createQ]) {
+        if (this._disposed) return;
+        const index = this._createQ.indexOf(f);
+        if (index < 0) continue;
+        try {
+          const exists = await this.plugin.app.vault.adapter.exists(f.path);
+          if (this._disposed) return;
+          if (!exists) {
+            this._createQ.splice(index, 1);
+            continue;
+          }
+          const content = await this.plugin.app.vault.adapter.read(noteFile.path);
+          if (this._disposed) return;
+          const link = this.plugin.app.fileManager.generateMarkdownLink(f, noteFile.path);
+          const relPath = relative(pDir(noteFile.path), f.path);
+          const found =
+            content.includes(link) ||
+            content.includes(f.name) ||
+            content.includes(relPath) ||
+            (noteFile.extension === "canvas" && content.includes(f.path));
+          if (!found) continue;
+          this._createQ.splice(index, 1);
+          await this.attachmentProcessor.processNewAttach(f, noteFile);
+          if (this._disposed) return;
+        } catch (e) {
+          if (this._disposed) return;
+          console.error("[AttachHub] attachment processing failed:", f.path, e);
+        }
       }
-      const content = await this.plugin.app.vault.adapter.read(noteFile.path);
-      const link = this.plugin.app.fileManager.generateMarkdownLink(f, noteFile.path);
-      const relPath = this.relative(this.pDir(noteFile.path), f.path);
-      const found =
-        content.includes(link) ||
-        content.includes(f.name) ||
-        content.includes(relPath) ||
-        (noteFile.extension === "canvas" && content.includes(f.path));
-      if (found) {
-        this._createQ.shift();
-        await this.attachmentProcessor.processNewAttach(f, noteFile);
-      }
-    } catch {}
+    });
+    return this._pasteTask;
   }
 
   private async _cleanOldAttachFolder(notePath: string): Promise<void> {
-    const setting = this.getOverride(this.settings, notePath);
+    if (this._disposed) return;
+    const setting = getOverride(this.settings, notePath);
     const obsFolder = getAttachmentFolderPath(this.plugin.app);
-    const noteDir = this.pDir(notePath);
-    const sub = this.resolveVars(setting.attachmentPath || "", {
+    const noteDir = pDir(notePath);
+    const sub = resolveVars(setting.attachmentPath || "", {
       dateFormat: this.settings.dateFormat,
-      noteName: this.pStem(notePath),
+      noteName: pStem(notePath),
       noteDir,
-      parentName: this.pBase(noteDir),
+      parentName: pBase(noteDir),
     });
-    const root = this.getRootPath(noteDir, setting, obsFolder);
-    const old = this.normalizePath(this.pJoin(root, sub));
-    if (old && (await this.isEmptyFolder(this.plugin.app.vault.adapter, old))) {
+    const root = getRootPath(noteDir, setting, obsFolder);
+    const old = pJoin(root, sub);
+    if (old && (await isEmptyFolder(this.plugin.app.vault.adapter, old)) && !this._disposed) {
       try { await this.plugin.app.vault.adapter.rmdir(old, true); } catch {}
-    }
-  }
-
-  // Helper methods
-  private isNote(f: unknown): f is TFile {
-    return isNote(f);
-  }
-
-  private isAttach(f: unknown): f is TFile {
-    return isAttach(f);
-  }
-
-  private isExcluded(dirPath: string, settings: AttachmentHubSettings): boolean {
-    return isExcluded(dirPath, settings);
-  }
-
-  private matchExt(ext: string, pat: string): boolean {
-    return pat ? new RegExp(pat).test(ext) : false;
-  }
-
-  private getOverride(settings: AttachmentHubSettings, filePath: string): AttachPathSettings {
-    return getOverride(settings, filePath);
-  }
-
-  private pDir(p: string): string {
-    const i = p.lastIndexOf("/");
-    return i < 0 ? "" : p.substring(0, i);
-  }
-
-  private pBase(p: string): string {
-    const i = p.lastIndexOf("/");
-    return i < 0 ? p : p.substring(i + 1);
-  }
-
-  private pStem(p: string): string {
-    const b = this.pBase(p), i = b.lastIndexOf(".");
-    return i < 0 ? b : b.substring(0, i);
-  }
-
-  private pJoin(...parts: string[]): string {
-    const s: string[] = [];
-    for (const p of parts) {
-      for (const seg of p.split("/")) {
-        if (seg === "..") s.pop();
-        else if (seg && seg !== ".") s.push(seg);
-      }
-    }
-    return s.join("/");
-  }
-
-  private normalizePath(p: string): string {
-    return normalizePath(p);
-  }
-
-  private relative(fromDir: string, toPath: string): string {
-    const f = fromDir ? fromDir.split("/") : [];
-    const t = toPath.split("/");
-    let c = 0;
-    while (c < f.length && c < t.length && f[c] === t[c]) c++;
-    const p: string[] = [];
-    for (let i = 0; i < f.length - c; i++) p.push("..");
-    p.push(...t.slice(c));
-    return p.join("/");
-  }
-
-  private resolveVars(template: string, ctx: VarCtx): string {
-    const w = window as Window & { moment?: () => { format: (fmt: string) => string } };
-    const d = w.moment
-      ? w.moment().format(ctx.dateFormat || "YYYYMMDDHHmmssSSS")
-      : Date.now().toString();
-    return template
-      .replace(/\$\{date\}/g, d)
-      .replace(/\$\{notename\}/g, ctx.noteName || "")
-      .replace(/\$\{notepath\}/g, ctx.noteDir || "")
-      .replace(/\$\{parent\}/g, ctx.parentName || "")
-      .replace(/\$\{originalname\}/g, ctx.origName || "")
-      .replace(/\$\{md5\}/g, ctx.md5 || "");
-  }
-
-  private getRootPath(noteDir: string, setting: AttachPathSettings, obsFolder: string): string {
-    switch (setting.saveAttE) {
-      case "inFolderBelow":
-        return this.normalizePath(setting.attachmentRoot || "");
-      case "nextToNote":
-        return this.normalizePath(this.pJoin(noteDir, (setting.attachmentRoot || "").replace(/^\.\//, "")));
-      default:
-        if (!obsFolder || obsFolder === "/") return obsFolder === "/" ? "" : "";
-        if (obsFolder === "./") return noteDir;
-        if (obsFolder.startsWith("./"))
-          return this.normalizePath(this.pJoin(noteDir, obsFolder.replace(/^\.\//, "")));
-        return this.normalizePath(obsFolder);
-    }
-  }
-
-  private async isEmptyFolder(adapter: AdapterWithList, p: string): Promise<boolean> {
-    if (!p) return false;
-    try {
-      const l = await adapter.list(p);
-      return !l.files.length && !l.folders.length;
-    } catch {
-      return false;
     }
   }
 }

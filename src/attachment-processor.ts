@@ -1,397 +1,224 @@
 import { Plugin, TFile, normalizePath, Notice } from "obsidian";
+import { Buffer } from "node:buffer";
+import {
+  AttachmentHubSettings, isImage, isVideo, isHeicExt, isPasted,
+  getExtOverride, getOverride, containsOrigVar, saveOrigName, normalizePathFormat,
+  shouldConvertImageExt, isExcluded,
+} from "./settings";
+import { convertVideoFile, copyMetadataToBuffer, isAnimatedHeic, VideoTarget } from "./ffmpeg-handler";
+import { convertImage, ImageFormat } from "./image-processor";
+import { decodeHeic } from "./heic-handler";
+import {
+  pDir, pBase, pStem, pJoin, relative, resolve, md5sum,
+  computeAttachPath, computeAttachName, dedup, parseFM, getFM,
+  replaceFMField, stripLink, fmtPath, extractResolvedPaths, ensureFolder,
+  getAttachmentFolderPath,
+} from "./utils";
+import { IndexManager } from "./index-manager";
 
 export interface ProcessorPlugin extends Plugin {
   saveSettings(): Promise<void>;
 }
-import {
-  AttachmentHubSettings,
-  isImage,
-  isVideo,
-  isHeicExt,
-  isPasted,
-  getExtOverride,
-  getOverride,
-  saveOrigName,
-  normalizePathFormat,
-  shouldConvertImageExt,
-} from "./settings";
-import { convertVideoFile, convertImageWithFFmpeg, copyMetadataToBuffer, isAnimatedHeic, VideoTarget } from "./ffmpeg-handler";
-import { convertImage, ImageFormat, ResizeOpts } from "./image-processor";
-import { decodeHeic } from "./heic-handler";
-import {
-  pDir, pBase, pExt, pStem, pJoin,
-  relative,
-  md5sum,
-  computeAttachPath,
-  computeAttachName,
-  dedup,
-  parseFM, writeFM,
-  stripLink, fmtPath,
-  ensureFolder,
-} from "./utils";
-import { pJoin as join } from "./path-utils";
-
-interface AdapterWithBasePath {
-  basePath?: string;
-}
-
-function getAttachmentFolderPath(app: unknown): string {
-  if (typeof app !== "object" || app === null) return "";
-  if ("getConfig" in app && typeof (app as { getConfig?: unknown }).getConfig === "function") {
-    const value = (app as { getConfig: (key: string) => unknown }).getConfig("attachmentFolderPath");
-    if (typeof value === "string") return value;
-  }
-  if ("vault" in app) {
-    const vault = (app as { vault?: unknown }).vault;
-    if (
-      typeof vault === "object" &&
-      vault !== null &&
-      "getConfig" in vault &&
-      typeof (vault as { getConfig?: unknown }).getConfig === "function"
-    ) {
-      const value = (vault as { getConfig: (key: string) => unknown }).getConfig("attachmentFolderPath");
-      if (typeof value === "string") return value;
-    }
-  }
-  return "";
-}
 
 export class AttachmentProcessor {
-  private plugin: ProcessorPlugin;
-  private settings: AttachmentHubSettings;
-  private _writing: Set<string>;
+  private disposed = false;
+  private created = new Set<string>();
 
-  constructor(plugin: ProcessorPlugin, settings: AttachmentHubSettings, writing: Set<string>) {
-    this.plugin = plugin;
-    this.settings = settings;
-    this._writing = writing;
+  constructor(
+    private plugin: ProcessorPlugin,
+    private settings: AttachmentHubSettings,
+    private writing: Set<string>,
+    private index?: IndexManager,
+  ) {}
+
+  dispose(): void {
+    this.disposed = true;
+    this.created.clear();
   }
 
-  async processNewAttach(attach: TFile, source: TFile): Promise<void> {
-    if (source.parent && this.isExcluded(source.parent.path)) return;
+  consumeCreated(path: string): boolean {
+    return this.created.delete(path);
+  }
+
+  async processNewAttach(attach: TFile, source: TFile): Promise<TFile> {
+    if (this.disposed || (source.parent && isExcluded(source.parent.path, this.settings))) return attach;
     const setting = getOverride(this.settings, source.path);
-    const eo = getExtOverride(attach.extension, setting);
-    if (!eo && !isImage(attach.extension) && !isVideo(attach.extension) && !isHeicExt(attach.extension) && !isPasted(attach)) return;
+    if (!getExtOverride(attach.extension, setting) && !isImage(attach.extension) &&
+        !isVideo(attach.extension) && !isHeicExt(attach.extension) && !isPasted(attach)) return attach;
 
-    // ── Conversion: only modify binary data, no rename yet ──
-    let convertedExt: string | null = null;
-    const shouldTryFFmpeg = this.settings.ffmpegPath && this.settings.videoConvertTo !== "disabled";
-    const shouldConvertImage = this.settings.convertTo !== "disabled";
-    const canConvertThisImage = shouldConvertImage && shouldConvertImageExt(this.settings, attach.extension);
-
-    if (isVideo(attach.extension)) {
-      if (shouldTryFFmpeg) {
-        const result = await this._convertVideoData(attach);
-        if (result) {
-          await this.plugin.app.vault.modifyBinary(attach, result.data);
-          convertedExt = result.ext;
-        }
-      }
-    } else if (isHeicExt(attach.extension) && canConvertThisImage) {
-      const animated = shouldTryFFmpeg && (await this._isHeicAnimated(attach));
-      if (animated) {
-        const result = await this._convertVideoData(attach);
-        if (result) {
-          await this.plugin.app.vault.modifyBinary(attach, result.data);
-          convertedExt = result.ext;
-        }
-      } else if (shouldConvertImage) {
-        const result = await this._convertImageData(attach);
-        if (result) {
-          await this.plugin.app.vault.modifyBinary(attach, result.data);
-          convertedExt = result.ext;
-        }
-      }
-    } else if (canConvertThisImage && isImage(attach.extension)) {
-      const result = await this._convertImageData(attach);
-      if (result) {
-        await this.plugin.app.vault.modifyBinary(attach, result.data);
-        convertedExt = result.ext;
-      }
-    }
-
-    // Use new extension if converted, otherwise keep original
-    const finalExt = convertedExt || attach.extension;
-
-    const obsFolder = getAttachmentFolderPath(this.plugin.app);
-    const attachPath = computeAttachPath(source, finalExt, setting, this.settings.dateFormat, obsFolder);
-    let attachName = await computeAttachName(
-      source, attach, setting, this.settings.dateFormat, this.plugin.app.vault.adapter,
-    );
-    attachName += "." + finalExt;
-
-    await ensureFolder(this.plugin.app.vault.adapter, attachPath);
-    const dedupName = await dedup(attachName, attachPath, this.plugin.app.vault.adapter);
-    const dst = normalizePath(pJoin(attachPath, dedupName));
-
-    const oldPath = attach.path;
-    const origBasename = pStem(attach.path);
+    let output = attach;
     try {
-      await this.plugin.app.fileManager.renameFile(attach, dst);
-    } catch (e) {
-      console.error("[AttachHub] rename failed:", e);
-      return;
+      let converted: { data: ArrayBuffer; ext: string } | null = null;
+      const videoEnabled = Boolean(this.settings.ffmpegPath) && this.settings.videoConvertTo !== "disabled";
+      const imageEnabled = this.settings.convertTo !== "disabled" && shouldConvertImageExt(this.settings, attach.extension);
+      const convertVideo = isVideo(attach.extension) && videoEnabled;
+      const convertStill = (isImage(attach.extension) || isHeicExt(attach.extension)) && imageEnabled;
+      if (convertVideo || (convertStill && isHeicExt(attach.extension) && videoEnabled && await this._isHeicAnimated(attach))) {
+        converted = await this._convertVideoData(attach);
+      } else if (convertStill) {
+        converted = await this._convertImageData(attach);
+      }
+      if (this.disposed) return attach;
+      if ((convertVideo || convertStill) && !converted) throw new Error("转换未完成");
+
+      const ext = converted?.ext || attach.extension;
+      const folder = computeAttachPath(source, ext, setting, this.settings.dateFormat, getAttachmentFolderPath(this.plugin.app));
+      const name = await computeAttachName(source, attach, setting, this.settings.dateFormat, this.plugin.app.vault.adapter);
+      if (this.disposed) return attach;
+      await ensureFolder(this.plugin.app.vault.adapter, folder);
+      const unique = await dedup(`${name}.${ext}`, folder, this.plugin.app.vault.adapter, converted ? undefined : attach.path);
+      if (this.disposed) return attach;
+      const destination = normalizePath(pJoin(folder, unique));
+      const oldPath = attach.path;
+      const originalName = pStem(oldPath);
+
+      if (converted) {
+        // Keep the original intact until a separate output and its reference are committed.
+        this.created.add(destination);
+        try {
+          output = await this.plugin.app.vault.createBinary(destination, converted.data);
+        } catch (error) {
+          this.created.delete(destination);
+          throw error;
+        }
+        if (this.disposed) return output;
+        const persisted = await this.plugin.app.vault.readBinary(output);
+        if (this.disposed) return output;
+        if (!Buffer.from(persisted).equals(Buffer.from(converted.data))) throw new Error("新文件校验失败，原图已保留");
+        const linked = await this._patchSourceNoteLink(source, oldPath, destination);
+        if (this.disposed) return output;
+        if (!linked) throw new Error("引用未能更新，新文件和原图均已保留");
+        await this.updateIndex(source);
+        if (this.disposed) return output;
+        const otherReferences = Object.entries(this.plugin.app.metadataCache.resolvedLinks || {})
+          .some(([note, links]) => note !== source.path && Boolean(links[oldPath]));
+        // eslint-disable-next-line obsidianmd/prefer-file-manager-trash-file -- Converted originals must remain recoverable even when permanent deletion is configured.
+        if (!otherReferences) await this.plugin.app.vault.trash(attach, true);
+      } else if (oldPath !== destination) {
+        await this.plugin.app.fileManager.renameFile(attach, destination);
+        if (this.disposed) return attach;
+        await this._patchSourceNoteLink(source, oldPath, destination);
+        await this.updateIndex(source);
+      }
+
+      if (this.disposed) return output;
+      if (containsOrigVar(setting, ext)) {
+        const hash = await md5sum(this.plugin.app.vault.adapter, output);
+        if (this.disposed) return output;
+        saveOrigName(this.settings, setting, ext, { n: originalName, md5: hash });
+        await this.plugin.saveSettings();
+      }
+      if (!this.settings.disableNotification) new Notice(`${converted ? "已转换" : "已处理"} ${pBase(oldPath)} → ${unique}`);
+    } catch (error) {
+      console.error("[AttachHub] attachment processing failed:", attach.path, error);
+      if (!this.disposed) new Notice(`附件处理未完成，原始数据已保留：${error instanceof Error ? error.message : String(error)}`);
     }
-
-    // fileManager.renameFile relies on resolvedLinks which may not be up-to-date
-    // after a fresh paste. Manually patch the source note to ensure the link is correct.
-    await this._patchSourceNoteLink(source, oldPath, dst);
-
-    const msg = convertedExt
-      ? `已转换并重命名 ${pBase(oldPath)} → ${dedupName}`
-      : `已重命名 ${pBase(oldPath)} → ${dedupName}`;
-    if (!this.settings.disableNotification) new Notice(msg);
-
-    const renamedFile = this.plugin.app.vault.getAbstractFileByPath(dst);
-    if (renamedFile instanceof TFile) {
-      const md5Val = await md5sum(this.plugin.app.vault.adapter, renamedFile);
-      saveOrigName(this.settings, setting, pExt(dst), { n: origBasename, md5: md5Val });
-      await this.plugin.saveSettings();
-    }
-
-    await this._updateFMAfterRename(source, oldPath, dst);
+    return output;
   }
 
-  /**
-   * Convert video data via system FFmpeg. Returns raw result, does NOT touch the vault file.
-   */
+  private absolutePath(attach: TFile): string | null {
+    const adapter = this.plugin.app.vault.adapter as { basePath?: string };
+    return adapter.basePath ? `${adapter.basePath}/${attach.path}` : null;
+  }
+
   private async _convertVideoData(attach: TFile): Promise<{ data: ArrayBuffer; ext: string } | null> {
-    try {
-      const basePath = (this.plugin.app.vault.adapter as AdapterWithBasePath).basePath;
-      if (!basePath) return null;
-      const absPath = join(basePath, attach.path);
-      return await convertVideoFile(absPath, attach.extension, {
-        ffmpegPath: this.settings.ffmpegPath,
-        target: this.settings.videoConvertTo as VideoTarget,
-        quality: this.settings.quality,
-        resizeValue: this.settings.resizeMode !== "disabled" ? this.settings.resizeValue : 0,
-        preserveExif: this.settings.preserveExif,
-        preserveGps: this.settings.preserveGps,
-      });
-    } catch (e: unknown) {
-      console.error("[AttachHub] Video conversion error:", e);
-      return null;
-    }
+    const path = this.absolutePath(attach);
+    if (!path || this.disposed) return null;
+    return convertVideoFile(path, attach.extension, {
+      ffmpegPath: this.settings.ffmpegPath,
+      target: this.settings.videoConvertTo as VideoTarget,
+      quality: this.settings.quality,
+      resizeValue: this.settings.resizeMode !== "disabled" ? this.settings.resizeValue : 0,
+      preserveExif: this.settings.preserveExif,
+      preserveGps: this.settings.preserveGps,
+    });
   }
 
-  /**
-   * Convert image data via Canvas API (HEIC decoded first).
-   * For HEIC: native decode → heic2any → FFmpeg fallback.
-   * Returns raw result, does NOT touch the vault file.
-   */
   private async _convertImageData(attach: TFile): Promise<{ data: ArrayBuffer; ext: string } | null> {
-    const target = this.settings.convertTo as ImageFormat;
-    if (target === "disabled") return null;
-    const ext = attach.extension.toLowerCase();
-    if (ext === target || (target === "jpg" && /^jpe?g$/.test(ext))) return null;
-
-    try {
-      const basePath = (this.plugin.app.vault.adapter as AdapterWithBasePath).basePath;
-      const absPath = basePath ? join(basePath, attach.path) : "";
-      if (this.settings.preserveExif && this.settings.ffmpegPath && absPath && !isHeicExt(attach.extension)) {
-        return await convertImageWithFFmpeg(absPath, {
-          ffmpegPath: this.settings.ffmpegPath,
-          targetExt: target,
-          quality: this.settings.quality,
-          resizeValue: this.settings.resizeMode !== "disabled" ? this.settings.resizeValue : 0,
-          preserveExif: this.settings.preserveExif,
-          preserveGps: this.settings.preserveGps,
-        });
-      }
-      if (isHeicExt(attach.extension)) {
-        const imgData = await this.plugin.app.vault.readBinary(attach);
-        const decoded = await decodeHeic(imgData);
-        if (!decoded) {
-          console.warn("[AttachHub] HEIC decode failed, skipping conversion");
-          return null;
-        }
-        const resize: ResizeOpts = {
-          mode: (this.settings.resizeMode || "disabled") as ResizeOpts["mode"],
-          value: this.settings.resizeValue || 0,
-        };
-        const converted = await convertImage(decoded, target, this.settings.quality, resize);
-        if (!converted) return null;
-        if (this.settings.preserveExif) {
-          const withMeta = await copyMetadataToBuffer(
-            imgData,
-            attach.extension,
-            converted.data,
-            converted.ext,
-            this.settings.preserveGps,
-          );
-          return { data: withMeta, ext: converted.ext };
-        }
-        return converted;
-      }
-
-      // Regular image (JPG/PNG/BMP/GIF/etc.) — Canvas API
-      const imgData = await this.plugin.app.vault.readBinary(attach);
-      const resize: ResizeOpts = {
-        mode: (this.settings.resizeMode || "disabled") as ResizeOpts["mode"],
-        value: this.settings.resizeValue || 0,
-      };
-      const converted = await convertImage(imgData, target, this.settings.quality, resize);
-      if (!converted) return null;
-      if (this.settings.preserveExif) {
-        const withMeta = await copyMetadataToBuffer(
-          imgData,
-          attach.extension,
-          converted.data,
-          converted.ext,
-          this.settings.preserveGps,
-        );
-        return { data: withMeta, ext: converted.ext };
-      }
-      return converted;
-    } catch (e: unknown) {
-      console.error("[AttachHub] Image conversion error:", e);
+    if (this.disposed || this.settings.convertTo === "disabled") return null;
+    if (!["webp", "jpg", "png"].includes(this.settings.convertTo)) throw new Error("无效的图片转换目标");
+    const original = await this.plugin.app.vault.readBinary(attach);
+    if (this.disposed) return null;
+    const decoded = isHeicExt(attach.extension) ? await decodeHeic(original) : original;
+    if (this.disposed) return null;
+    if (!decoded) {
+      new Notice(`HEIC 转换失败，已保留原图：${attach.name}`);
       return null;
     }
+    const converted = await convertImage(decoded, this.settings.convertTo as ImageFormat, this.settings.quality, {
+      mode: this.settings.resizeMode as "disabled" | "width" | "height" | "longest" | "shortest",
+      value: this.settings.resizeValue,
+    });
+    if (!converted || this.disposed) return null;
+    if (this.settings.preserveExif) {
+      const data = await copyMetadataToBuffer(original, attach.extension, converted.data, converted.ext, this.settings.preserveGps);
+      return this.disposed ? null : { data, ext: converted.ext };
+    }
+    return converted;
   }
 
   private async _isHeicAnimated(attach: TFile): Promise<boolean> {
+    const path = this.absolutePath(attach);
+    if (!path || this.disposed) return false;
+    try { return await isAnimatedHeic(path); } catch { return false; }
+  }
+
+  private async _patchSourceNoteLink(source: TFile, oldPath: string, newPath: string): Promise<boolean> {
+    if (this.disposed) return false;
+    let linked = false;
+    this.writing.add(source.path);
     try {
-      const basePath = (this.plugin.app.vault.adapter as AdapterWithBasePath).basePath;
-      if (!basePath) return false;
-      const absPath = join(basePath, attach.path);
-      return await isAnimatedHeic(absPath);
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * Directly patch the source note to replace old attachment references with the new path.
-   * fileManager.renameFile depends on resolvedLinks which may be stale right after a paste,
-   * so we do a manual text replacement as a reliable fallback.
-   */
-  private async _patchSourceNoteLink(source: TFile, oldAttachPath: string, newAttachPath: string): Promise<void> {
-    try {
-      let content = await this.plugin.app.vault.read(source);
-      const oldName = pBase(oldAttachPath);
-      const newName = pBase(newAttachPath);
-      if (oldName === newName) return;
-
-      const noteDir = pDir(source.path);
-      const oldRel = relative(noteDir, oldAttachPath);
-      const newRel = relative(noteDir, newAttachPath);
-
-      let changed = false;
-
-      // Wikilink: ![[oldName]] or ![[oldPath]]
-      const wikiPatterns = [
-        `![[${oldName}]]`,
-        `![[${oldAttachPath}]]`,
-        `[[${oldName}]]`,
-        `[[${oldAttachPath}]]`,
-      ];
-      for (const pat of wikiPatterns) {
-        if (content.includes(pat)) {
-          const replacement = pat.startsWith("!") ? `![[${newName}]]` : `[[${newName}]]`;
-          content = content.split(pat).join(replacement);
-          changed = true;
+      await this.plugin.app.vault.process(source, current => {
+        if (this.disposed) return current;
+        if (source.extension === "canvas") {
+          const canvas = JSON.parse(current) as { nodes?: Array<{ file?: string; background?: string }> };
+          for (const node of canvas.nodes || []) {
+            for (const key of ["file", "background"] as const) {
+              if (node[key] === oldPath) { node[key] = newPath; linked = true; }
+            }
+          }
+          return linked ? JSON.stringify(canvas, null, "\t") : current;
         }
-      }
-
-      // Markdown link: ![...](oldRel) or ![...](encoded)
-      const mdPatterns = [oldRel, encodeURI(oldRel), oldName, encodeURI(oldName)];
-      for (const p of mdPatterns) {
-        const escaped = p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const re = new RegExp(`(!\\[[^\\]]*\\])\\(${escaped}\\)`, "g");
-        if (re.test(content)) {
-          content = content.replace(re, `$1(${newRel})`);
-          changed = true;
+        const dir = pDir(source.path);
+        const oldName = pBase(oldPath), newName = pBase(newPath);
+        const oldRel = relative(dir, oldPath), newRel = relative(dir, newPath);
+        const targets = new Set([oldName, oldPath, oldRel]);
+        let content = current.replace(/(!?\[\[)([^\]|]+)((?:\|[^\]]*)?)\]\]/g,
+          (match, open: string, target: string, alias: string) => {
+            if (!targets.has(target)) return match;
+            linked = true;
+            return `${open}${target === oldName ? newName : target === oldPath ? newPath : newRel}${alias}]]`;
+          });
+        const mdTargets = [...new Set([...targets].flatMap(path => [path, encodeURI(path)]))]
+          .map(path => path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).sort((a, b) => b.length - a.length);
+        const markdown = new RegExp(`(!?\\[[^\\]]*\\])\\((?:${mdTargets.join("|")})(\\s+["'][^\\n]*["'])?\\)`, "g");
+        content = content.replace(markdown, (_match, label: string, title: string | undefined) => {
+          linked = true;
+          return `${label}(${newRel.split("/").map(encodeURIComponent).join("/")}${title || ""})`;
+        });
+        const fm = parseFM(current);
+        if (fm) {
+          for (const field of this.settings.trackedFields) {
+            const value = fm[field];
+            if (typeof value !== "string") continue;
+            const plain = stripLink(value) || value;
+            if (resolve(dir, plain) === oldPath || plain === oldPath || plain === oldName) {
+              content = replaceFMField(content, field, fmtPath(newRel, normalizePathFormat(this.settings.pathFormat)));
+              linked = true;
+            }
+          }
         }
-      }
-
-      if (changed) {
-        this._writing.add(source.path);
-        try {
-          await this.plugin.app.vault.modify(source, content);
-        } finally {
-          setTimeout(() => this._writing.delete(source.path), 2000);
-        }
-      }
-    } catch (e) {
-      console.error("[AttachHub] patch source note failed:", e);
+        return content;
+      });
+    } finally {
+      this.writing.delete(source.path);
     }
+    return linked;
   }
 
-  private async _updateFMAfterRename(source: TFile, oldAttachPath: string, newAttachPath: string): Promise<void> {
-    let content: string;
-    try { content = await this.plugin.app.vault.read(source); } catch { return; }
-    const fm = parseFM(content);
-    if (!fm) return;
-    const noteDir = pDir(source.path);
-    const fmt = normalizePathFormat(this.settings.pathFormat);
-    const upd: Record<string, string> = {};
-    for (const field of this.settings.trackedFields) {
-      const val = fm[field];
-      if (typeof val !== "string" || !val) continue;
-      const plain = stripLink(val) || val;
-      const resolved = this.resolve(noteDir, plain);
-      if (resolved && normalizePath(resolved) === normalizePath(oldAttachPath)) {
-        upd[field] = fmtPath(relative(noteDir, newAttachPath), fmt);
-      }
-    }
-    if (Object.keys(upd).length) {
-      this._writing.add(source.path);
-      try { await writeFM(this.plugin.app, source, upd); } finally {
-        setTimeout(() => this._writing.delete(source.path), 2000);
-      }
-      const newFM = await this.getFM(source);
-      if (newFM) this.updateNoteIndex(source.path, this.extractResolvedPaths(newFM, this.settings.trackedFields, noteDir));
-    }
-  }
-
-  // Helper methods that will be implemented in the main plugin
-  private isExcluded(dirPath: string): boolean {
-    for (const ep of this.settings.excludePathsArray || []) {
-      if (!ep) continue;
-      if (this.settings.excludeSubpaths && dirPath.startsWith(ep)) return true;
-      if (dirPath === ep) return true;
-    }
-    return false;
-  }
-
-  private resolve(fromDir: string, rel: string): string | null {
-    if (!rel || rel.startsWith("http://") || rel.startsWith("https://")) return null;
-    const s = fromDir ? fromDir.split("/") : [];
-    for (const p of rel.split("/")) {
-      if (p === "..") s.pop();
-      else if (p !== "." && p) s.push(p);
-    }
-    return normalizePath(s.join("/"));
-  }
-
-  private async getFM(file: TFile): Promise<Record<string, unknown> | null> {
-    const c = this.plugin.app.metadataCache.getFileCache(file);
-    if (c?.frontmatter) return c.frontmatter;
-    try {
-      return parseFM(await this.plugin.app.vault.cachedRead(file));
-    } catch {
-      return null;
-    }
-  }
-
-  private updateNoteIndex(notePath: string, newMap: Map<string, string> | null): void {
-    // This will be implemented in the main plugin
-  }
-
-  private extractResolvedPaths(
-    fm: Record<string, unknown>,
-    trackedFields: string[],
-    noteDir: string,
-  ): Map<string, string> {
-    const result = new Map<string, string>();
-    for (const field of trackedFields) {
-      const val = fm[field];
-      if (typeof val !== "string" || !val) continue;
-      const plain = stripLink(val) || val;
-      if (plain.startsWith("http://") || plain.startsWith("https://")) continue;
-      const resolved = this.resolve(noteDir, plain);
-      if (resolved) result.set(field, normalizePath(resolved));
-    }
-    return result;
+  private async updateIndex(source: TFile): Promise<void> {
+    if (!this.index || this.disposed || source.extension === "canvas") return;
+    const fm = await getFM(this.plugin.app, source);
+    if (!this.disposed) this.index.updateNoteIndex(source.path, fm ? extractResolvedPaths(fm, this.settings.trackedFields, pDir(source.path)) : null);
   }
 }

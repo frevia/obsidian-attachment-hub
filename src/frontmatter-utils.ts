@@ -1,87 +1,69 @@
-import { App, TFile } from "obsidian";
+import { App, parseYaml, stringifyYaml, TFile } from "obsidian";
 import { resolve } from "./path-utils";
 
 // ══════════════════════════════════════════════════════════════
 // Frontmatter I/O
 // ══════════════════════════════════════════════════════════════
 
-const RE_FM = /^---\r?\n([\s\S]*?)\r?\n---/;
+const RE_FM = /^---\r?\n(?:([\s\S]*?)\r?\n)?---(?=\r?\n|$)/;
 
-export function parseFM(content: string): Record<string, string> | null {
-  const m = content.match(RE_FM);
-  if (!m) return null;
-  const r: Record<string, string> = {};
-  for (const line of m[1].split(/\r?\n/)) {
-    const ci = line.indexOf(":");
-    if (ci < 0) continue;
-    const k = line.substring(0, ci).trim();
-    let v = line.substring(ci + 1).trim();
-    if (
-      (v[0] === '"' && v[v.length - 1] === '"') ||
-      (v[0] === "'" && v[v.length - 1] === "'")
-    )
-      v = v.slice(1, -1);
-    if (k && k[0] !== " " && k[0] !== "-") r[k] = v;
-  }
-  return r;
+export function parseFM(content: string): Record<string, unknown> | null {
+  const section = fmSection(content);
+  if (section === null) return null;
+  const parsed: unknown = section.trim() ? parseYaml(section) : {};
+  return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown>
+    : null;
 }
 
 export function fmSection(content: string): string | null {
   const m = content.match(RE_FM);
-  return m ? m[1] : null;
-}
-
-export function yamlSafe(v: string): string {
-  if (!v) return '""';
-  // Don't quote markdown links like ![](path) or [[path]]
-  if (/^!\[.*?\]\(.*?\)$/.test(v) || /^\[\[.*?\]\]$/.test(v)) return v;
-  // Quote values that start with special YAML characters or contain problematic patterns
-  if (/[#%&*{},|>`"']/.test(v[0]) || /:\s/.test(v) || /\s#/.test(v))
-    return `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-  return v;
+  return m ? m[1] || "" : null;
 }
 
 export function replaceFMField(content: string, key: string, val: string): string {
   const m = content.match(RE_FM);
-  if (!m) return content;
-  const lines = m[1].split(/\r?\n/);
-  let found = false;
-  const s = yamlSafe(val);
-  for (let i = 0; i < lines.length; i++) {
-    const ci = lines[i].indexOf(":");
-    if (ci >= 0 && lines[i].substring(0, ci).trim() === key) {
-      lines[i] = `${key}: ${s}`;
-      found = true;
-      break;
-    }
-  }
-  if (!found) lines.push(`${key}: ${s}`);
-  return content.replace(RE_FM, `---\n${lines.join("\n")}\n---`);
+  const newline = content.includes("\r\n") ? "\r\n" : "\n";
+  const fm = m ? parseFM(content) : {};
+  if (fm === null) throw new Error("Invalid YAML frontmatter");
+  fm[key] = val;
+  const serialized = stringifyYaml(fm).trimEnd().replace(/\r?\n/g, newline);
+  const header = `---${newline}${serialized}${newline}---`;
+  return m
+    ? `${header}${content.slice(m[0].length)}`
+    : `${header}${newline}${content}`;
 }
 
 export async function getFM(
   app: App,
   f: TFile,
 ): Promise<Record<string, unknown> | null> {
-  const c = app.metadataCache.getFileCache(f);
-  if (c?.frontmatter) return c.frontmatter;
+  let content: string;
   try {
-    return parseFM(await app.vault.cachedRead(f));
+    content = await app.vault.read(f);
   } catch {
-    return null;
+    return app.metadataCache.getFileCache(f)?.frontmatter || null;
   }
+  return parseFM(content);
 }
 
 export async function writeFM(
   app: App,
   f: TFile,
   upd: Record<string, string>,
+  canWrite: () => boolean = () => true,
 ): Promise<boolean> {
   try {
-    let c = await app.vault.read(f);
-    for (const [k, v] of Object.entries(upd)) c = replaceFMField(c, k, v);
-    await app.vault.modify(f, c);
-    return true;
+    if (!canWrite()) return false;
+    let wrote = false;
+    await app.vault.process(f, current => {
+      if (!canWrite()) return current;
+      let updated = current;
+      for (const [k, v] of Object.entries(upd)) updated = replaceFMField(updated, k, v);
+      wrote = true;
+      return updated;
+    });
+    return wrote;
   } catch (e) {
     console.error("[AttachHub]", f.path, e);
     return false;

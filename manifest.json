@@ -6,5 +6,5 @@
 	"description": "All-in-one attachment management: auto-rename pasted/dropped files, image conversion & compression, frontmatter path sync, and more.",
 	"author": "Frevia",
 	"authorUrl": "https://github.com/frevia",
-	"isDesktopOnly": false
+	"isDesktopOnly": true
 }
