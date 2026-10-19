@@ -106,18 +106,19 @@ export async function computeAttachName(
   dateFormat: string,
   adapter: unknown,
   fallbackName?: string,
+  filenamePrefix = "",
 ): Promise<string> {
   const eff = effectiveSetting(setting, attachFile ? pExt(attachFile.path) : null);
   const fmt = eff.attachFormat || "img-${date}";
   const noteName = pStem(noteFile.path);
   const md5Val = attachFile && fmt.includes("${md5}") ? await md5sum(adapter, attachFile) : "";
 
-  if (fmt.includes("${originalname}")) {
-    const origName = attachFile ? pStem(attachFile.path) : "";
-    if (!origName && fallbackName) return fallbackName;
-    return resolveVars(fmt, { dateFormat, noteName, noteDir: "", parentName: "", origName, md5: md5Val });
-  }
-  return resolveVars(fmt, { dateFormat, noteName, noteDir: "", parentName: "", origName: "", md5: md5Val });
+  const origName = attachFile ? pStem(attachFile.path) : "";
+  const name = fmt.includes("${originalname}") && !origName && fallbackName
+    ? fallbackName
+    : resolveVars(fmt, { dateFormat, noteName, noteDir: "", parentName: "", origName, md5: md5Val });
+  const prefix = filenamePrefix.replace(/[<>:"/\\|?*\p{Cc}]/gu, "_").trim();
+  return prefix && !name.startsWith(prefix) ? prefix + (name || "clipboard") : name;
 }
 
 export function getAttachmentFolderPath(app: unknown): string {

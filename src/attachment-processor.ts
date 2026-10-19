@@ -63,7 +63,7 @@ export class AttachmentProcessor {
 
       const ext = converted?.ext || attach.extension;
       const folder = computeAttachPath(source, ext, setting, this.settings.dateFormat, getAttachmentFolderPath(this.plugin.app));
-      const name = await computeAttachName(source, attach, setting, this.settings.dateFormat, this.plugin.app.vault.adapter);
+      const name = await computeAttachName(source, attach, setting, this.settings.dateFormat, this.plugin.app.vault.adapter, undefined, this.settings.filenamePrefix);
       if (this.disposed) return attach;
       await ensureFolder(this.plugin.app.vault.adapter, folder);
       const unique = await dedup(`${name}.${ext}`, folder, this.plugin.app.vault.adapter, converted ? undefined : attach.path);

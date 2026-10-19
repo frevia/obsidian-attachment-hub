@@ -115,6 +115,7 @@ export interface OriginalNameEntry {
 
 export interface AttachmentHubSettings {
   attachPath: AttachPathSettings;
+  filenamePrefix: string;
   dateFormat: string;
 
   excludeExtensionPattern: string;
@@ -152,6 +153,7 @@ export const DEFAULT_SETTINGS: AttachmentHubSettings = {
     type: "GLOBAL",
     extensionOverride: [],
   },
+  filenamePrefix: "",
   dateFormat: "YYYYMMDDHHmmssSSS",
 
   excludeExtensionPattern: "",
