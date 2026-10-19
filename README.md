@@ -8,7 +8,7 @@ Obsidian 全能附件管理插件：自动重命名、格式转换、路径同�
 
 ### 附件管理
 
-- **粘贴/拖拽自动重命名**：支持自定义命名格式，变量包括 `${date}`、`${notename}`、`${originalname}`、`${md5}`
+- **粘贴/拖拽自动重命名**：支持自定义命名格式，变量包括 `${date}`、`${notename}`、`${originalname}`、`${md5}`。设置 → Attachment Hub → 附件存储 → 文件名前缀可统一添加前缀（如 `photo-`），对文件夹/扩展名覆盖及粘贴到 frontmatter 同样生效；留空保持现有命名。前缀不自动补分隔符，已有相同开头不重复添加，非法文件名字符替换为 `_`。例如前缀 `photo-` 配合 `${originalname}`，`cover.heic` 转换后为 `photo-cover.webp`。
 - **自定义存储位置**：跟随 Obsidian 设置 / Vault 根目录子文件夹 / 笔记同级目录
 - **子路径模板**：支持 `${notename}`、`${notepath}`、`${parent}`、`${date}` 变量
 - **扩展名覆盖**：针对不同文件类型设置不同的命名规则

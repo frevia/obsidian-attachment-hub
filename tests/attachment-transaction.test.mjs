@@ -227,3 +227,14 @@ test("canvas file nodes are updated without adding YAML or breaking JSON", async
   assert.equal(canvas.nodes[0].file, "attachments/output.webp");
   assert.equal(f.trash.length, 1);
 });
+
+test("conversion prefixes names from extension overrides and deduplicates before patching links", async () => {
+  const f = fixture();
+  f.settings.filenamePrefix = "photo-";
+  f.settings.attachPath.extensionOverride = [{ extension: "png", saveAttE: "obsFolder", attachFormat: "custom", attachmentPath: "" }];
+  f.files.set("attachments/photo-custom.webp", { file: new TFile("attachments/photo-custom.webp"), data: original });
+  const output = await f.processor.processNewAttach(f.image, f.source);
+  assert.equal(output.path, "attachments/photo-custom-1.webp");
+  assert.match(f.files.get(f.source.path).data, /!\[\[photo-custom-1.webp\|500\]\]/);
+  assert.equal(f.trash.length, 1);
+});

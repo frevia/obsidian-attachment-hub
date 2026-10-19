@@ -70,6 +70,19 @@ export class AttachmentHubSettingTab extends PluginSettingTab {
       );
 
     new Setting(el)
+      .setName("文件名前缀")
+      .setDesc("添加到命名格式生成的名称前，所有文件夹和扩展名规则均生效。留空不添加；分隔符需自行填写，例如 photo-。文件名已以此前缀开头时不重复添加，非法文件名字符替换为下划线。")
+      .addText(t =>
+        t
+          .setValue(this.plugin.settings.filenamePrefix || "")
+          .setPlaceholder("例如 photo-")
+          .onChange(async v => {
+            this.plugin.settings.filenamePrefix = v;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(el)
       .setName("附件命名格式")
       .setDesc("粘贴/拖拽文件的命名规则。变量：${date} ${notename} ${originalname} ${md5}")
       .addText(t =>

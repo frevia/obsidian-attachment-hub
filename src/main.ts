@@ -140,7 +140,7 @@ export default class AttachmentHubPlugin extends Plugin {
         if (this.disposed) return;
         const setting = getOverride(this.settings, noteFile.path);
         const folder = computeAttachPath(noteFile, clip.ext, setting, this.settings.dateFormat, getAttachmentFolderPath(this.app));
-        const name = await computeAttachName(noteFile, null, setting, this.settings.dateFormat, this.app.vault.adapter);
+        const name = await computeAttachName(noteFile, null, setting, this.settings.dateFormat, this.app.vault.adapter, undefined, this.settings.filenamePrefix);
         if (this.disposed) return;
         await ensureFolder(this.app.vault.adapter, folder);
         const unique = await dedup(`${name || "clipboard"}.${clip.ext}`, folder, this.app.vault.adapter);

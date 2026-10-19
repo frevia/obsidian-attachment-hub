@@ -94,6 +94,18 @@ test("paste-to-frontmatter creates missing YAML and retains the existing body", 
   assert.ok(f.files.has("attachments/clipboard.png"));
 });
 
+test("paste-to-frontmatter applies the global prefix to folder overrides and deduplicates", async () => {
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: {
+    clipboard: { read: async () => [{ types: ["image/png"], getType: async () => new Blob([new Uint8Array([1])]) }] },
+  } });
+  const f = fixture("body", ["attachments/photo-clipboard.png"]);
+  f.plugin.settings.filenamePrefix = "photo-";
+  f.plugin.settings.overridePath.notes = { ...f.plugin.settings.attachPath, type: "FOLDER", attachFormat: "${originalname}" };
+  await f.plugin._pasteFM(f.note);
+  assert.equal(yaml.load(f.files.get(f.note.path).data.split("---")[1]).cover, "../attachments/photo-clipboard-1.png");
+  assert.ok(f.files.has("attachments/photo-clipboard-1.png"));
+});
+
 test("frontmatter updates read current text, preserve nested values and refresh the index", async () => {
   const f = fixture('---\ncover: "![[../attachments/image.jpg]]"\nmetadata:\n  cover: nested.jpg\n---\nlatest prose');
   await f.sync.onFMChange(f.note);
